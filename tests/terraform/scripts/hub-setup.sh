@@ -172,14 +172,14 @@ ENROLL_TOKEN_PRODUCER=$(curl -sf \
   -X POST "http://localhost:8201/api/v1/sentinels/enrollments" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $ADMIN_JWT" \
-  -d '{"service_id": "aws-sentinel-producer", "role": "producer", "env": "loadtest", "expires_in_seconds": 3600}' \
+  -d '{"service_id": "aws-sentinel-producer", "role": "producer", "env": "dev", "expires_in_seconds": 3600}' \
   | jq -r '.token')
 
 ENROLL_TOKEN_CONSUMER=$(curl -sf \
   -X POST "http://localhost:8201/api/v1/sentinels/enrollments" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $ADMIN_JWT" \
-  -d '{"service_id": "aws-sentinel-consumer", "role": "consumer", "env": "loadtest", "expires_in_seconds": 3600}' \
+  -d '{"service_id": "aws-sentinel-consumer", "role": "consumer", "env": "dev", "expires_in_seconds": 3600}' \
   | jq -r '.token')
 
 echo "  Producer token issued (first 8 chars): ${ENROLL_TOKEN_PRODUCER:0:8}..."
