@@ -168,6 +168,32 @@ if [ -z "$ADMIN_JWT" ] || [ "$ADMIN_JWT" = "null" ]; then
 fi
 echo "  Admin JWT obtained"
 
+# ── Register App and Services in discovery (required before enrollment) ───────
+APP_ID=$(curl -sf \
+  -X POST "http://localhost:8201/api/v1/apps" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $ADMIN_JWT" \
+  -d '{"name": "connect-loadtest", "owner": "bootstrap"}' \
+  | jq -r '.id')
+
+if [ -z "$APP_ID" ] || [ "$APP_ID" = "null" ]; then
+  echo "ERROR: Failed to create app in discovery" >&2
+  exit 1
+fi
+echo "  App registered: $APP_ID"
+
+curl -sf -X POST "http://localhost:8201/api/v1/services" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $ADMIN_JWT" \
+  -d "{\"app_id\": \"$APP_ID\", \"service_id\": \"aws-sentinel-producer\", \"env\": \"dev\", \"display_name\": \"AWS Sentinel Producer\", \"base_url\": \"http://producer:8080\"}" \
+  | jq -r '.service_id' | xargs -I{} echo "  Service registered: {}"
+
+curl -sf -X POST "http://localhost:8201/api/v1/services" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $ADMIN_JWT" \
+  -d "{\"app_id\": \"$APP_ID\", \"service_id\": \"aws-sentinel-consumer\", \"env\": \"dev\", \"display_name\": \"AWS Sentinel Consumer\", \"base_url\": \"http://consumer:8080\"}" \
+  | jq -r '.service_id' | xargs -I{} echo "  Service registered: {}"
+
 ENROLL_TOKEN_PRODUCER=$(curl -sf \
   -X POST "http://localhost:8201/api/v1/sentinels/enrollments" \
   -H "Content-Type: application/json" \
