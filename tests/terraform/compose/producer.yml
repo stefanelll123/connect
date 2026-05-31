@@ -37,6 +37,7 @@ services:
       SESSION_RATE_LIMIT_PER_MINUTE: "300"
       ENROLLMENT_TOKEN: ${ENROLLMENT_TOKEN_PRODUCER}
     ports:
+      - "8080:8080"
       - "8100:8080"
     volumes:
       - sentinel_producer_data:/data
