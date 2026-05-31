@@ -1,0 +1,70 @@
+name: CD — Deploy Contracts
+
+on:
+  push:
+    tags:
+      - "contract-v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy-contracts:
+    name: Deploy contracts to production chain
+    runs-on: ubuntu-latest
+    environment:
+      name: contracts-production
+      url: https://sepolia.etherscan.io
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: contracts/package-lock.json
+
+      - name: Install dependencies
+        working-directory: contracts
+        run: npm ci
+
+      - name: Compile contracts
+        working-directory: contracts
+        run: npx hardhat compile
+
+      - name: Run tests (must pass before deploy)
+        working-directory: contracts
+        run: npx hardhat test
+
+      - name: Deploy contracts
+        working-directory: contracts
+        env:
+          DEPLOYER_PRIVATE_KEY: ${{ secrets.CONTRACT_DEPLOYER_PRIVATE_KEY }}
+          RPC_URL: ${{ secrets.SEPOLIA_RPC_URL }}
+          ETHERSCAN_API_KEY: ${{ secrets.ETHERSCAN_API_KEY }}
+        run: |
+          npx hardhat run scripts/deploy/deploy-all.ts \
+            --network sepolia
+
+      - name: Export ABIs
+        working-directory: contracts
+        run: npx ts-node scripts/export-abis.ts
+
+      - name: Upload deployment artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-deployments-${{ github.ref_name }}
+          path: |
+            contracts/deployments/
+            contracts/abis/
+          retention-days: 365
+
+      - name: Verify contracts on Etherscan
+        working-directory: contracts
+        env:
+          ETHERSCAN_API_KEY: ${{ secrets.ETHERSCAN_API_KEY }}
+        run: |
+          npx hardhat verify --network sepolia || true

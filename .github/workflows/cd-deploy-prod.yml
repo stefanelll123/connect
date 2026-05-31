@@ -1,0 +1,107 @@
+name: CD — Deploy to Production
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy-production:
+    name: Deploy to production cluster
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://discovery.internal
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Helm
+        run: curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Configure kubectl
+        uses: azure/k8s-set-context@v4
+        with:
+          method: kubeconfig
+          kubeconfig: ${{ secrets.PROD_KUBECONFIG }}
+
+      - name: Derive image tag from git tag
+        id: tags
+        run: |
+          GIT_TAG="${GITHUB_REF_NAME}"
+          echo "tag=${GIT_TAG}" >> $GITHUB_OUTPUT
+          # Also resolve the SHA tag from the annotated tag's commit
+          SHA=$(git rev-parse --short HEAD)
+          echo "sha_tag=sha-${SHA}" >> $GITHUB_OUTPUT
+
+      - name: Verify image signatures
+        run: |
+          REGISTRY=ghcr.io/${{ github.repository }}
+          SHA_TAG=${{ steps.tags.outputs.sha_tag }}
+          for IMAGE in discovery sentinel discovery-ui; do
+            cosign verify \
+              --certificate-identity-regexp="https://github.com/${{ github.repository }}/.github/workflows/cd-build.yml" \
+              --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
+              "${REGISTRY}/${IMAGE}:${SHA_TAG}"
+          done
+
+      - name: Snapshot helm releases for rollback
+        run: |
+          helm history sentinel-discovery --namespace sentinel-prod --max 1 --output json > prev-discovery.json || echo "[]" > prev-discovery.json
+          helm history sentinel-node --namespace sentinel-prod --max 1 --output json > prev-sentinel.json || echo "[]" > prev-sentinel.json
+
+      - name: Deploy Discovery to production
+        id: deploy-discovery
+        run: |
+          helm upgrade --install sentinel-discovery infra/helm/discovery \
+            --namespace sentinel-prod \
+            --create-namespace \
+            --values infra/helm/discovery/values-prod.yaml \
+            --set image.tag=${{ steps.tags.outputs.sha_tag }} \
+            --atomic \
+            --timeout 15m
+
+      - name: Deploy Sentinel to production
+        id: deploy-sentinel
+        run: |
+          helm upgrade --install sentinel-node infra/helm/sentinel \
+            --namespace sentinel-prod \
+            --create-namespace \
+            --set image.tag=${{ steps.tags.outputs.sha_tag }} \
+            --set replicaCount=3 \
+            --atomic \
+            --timeout 15m
+
+      - name: Run smoke tests
+        id: smoke
+        run: bash tests/smoke/smoke_test.sh
+        env:
+          SMOKE_BASE_URL: https://discovery.internal
+
+      - name: Auto-rollback on smoke failure
+        if: failure() && steps.smoke.conclusion == 'failure'
+        run: |
+          echo "Smoke tests failed — initiating auto-rollback"
+          helm rollback sentinel-discovery --namespace sentinel-prod || true
+          helm rollback sentinel-node --namespace sentinel-prod || true
+          echo "Rollback complete"
+          exit 1
+
+      - name: Tag Docker images with release version
+        if: success()
+        run: |
+          REGISTRY=ghcr.io/${{ github.repository }}
+          SHA_TAG=${{ steps.tags.outputs.sha_tag }}
+          GIT_TAG=${{ steps.tags.outputs.tag }}
+          for IMAGE in discovery sentinel discovery-ui; do
+            docker buildx imagetools create \
+              --tag "${REGISTRY}/${IMAGE}:${GIT_TAG}" \
+              "${REGISTRY}/${IMAGE}:${SHA_TAG}"
+          done

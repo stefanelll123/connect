@@ -1,0 +1,77 @@
+name: CD — Deploy to Staging
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to deploy (e.g. sha-abc1234)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy-staging:
+    name: Deploy to staging cluster
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+      url: https://staging.discovery.internal
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Helm
+        run: curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Configure kubectl
+        uses: azure/k8s-set-context@v4
+        with:
+          method: kubeconfig
+          kubeconfig: ${{ secrets.STAGING_KUBECONFIG }}
+
+      - name: Verify image signatures
+        run: |
+          REGISTRY=ghcr.io/${{ github.repository }}
+          TAG=${{ inputs.image_tag }}
+          for IMAGE in discovery sentinel discovery-ui; do
+            cosign verify \
+              --certificate-identity-regexp="https://github.com/${{ github.repository }}/.github/workflows/cd-build.yml" \
+              --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
+              "${REGISTRY}/${IMAGE}:${TAG}"
+          done
+
+      - name: Deploy Discovery to staging
+        run: |
+          helm upgrade --install sentinel-discovery infra/helm/discovery \
+            --namespace sentinel-staging \
+            --create-namespace \
+            --values infra/helm/discovery/values-staging.yaml \
+            --set image.tag=${{ inputs.image_tag }} \
+            --atomic \
+            --timeout 10m
+
+      - name: Deploy Sentinel to staging
+        run: |
+          helm upgrade --install sentinel-node infra/helm/sentinel \
+            --namespace sentinel-staging \
+            --create-namespace \
+            --set image.tag=${{ inputs.image_tag }} \
+            --atomic \
+            --timeout 10m
+
+      - name: Run smoke tests
+        run: bash tests/smoke/smoke_test.sh
+        env:
+          SMOKE_BASE_URL: https://staging.discovery.internal
+
+      - name: Rollback on failure
+        if: failure()
+        run: |
+          helm rollback sentinel-discovery --namespace sentinel-staging || true
+          helm rollback sentinel-node --namespace sentinel-staging || true

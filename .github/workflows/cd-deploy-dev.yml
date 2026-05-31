@@ -1,0 +1,87 @@
+name: CD — Deploy to Dev
+
+on:
+  workflow_run:
+    workflows: ["CD — Build & Publish Images"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy-dev:
+    name: Deploy to dev cluster
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    environment:
+      name: dev
+      url: https://dev.discovery.internal
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          pip install cosign
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Configure kubectl
+        uses: azure/k8s-set-context@v4
+        with:
+          method: kubeconfig
+          kubeconfig: ${{ secrets.DEV_KUBECONFIG }}
+
+      - name: Determine image tags
+        id: tags
+        run: |
+          SHA=$(echo ${{ github.event.workflow_run.head_sha }} | head -c 7)
+          echo "sha=sha-${SHA}" >> $GITHUB_OUTPUT
+          echo "registry=ghcr.io/${{ github.repository }}" >> $GITHUB_OUTPUT
+
+      - name: Verify image signatures (cosign)
+        run: |
+          REGISTRY=${{ steps.tags.outputs.registry }}
+          SHA_TAG=${{ steps.tags.outputs.sha }}
+          for IMAGE in discovery sentinel discovery-ui; do
+            cosign verify \
+              --certificate-identity-regexp="https://github.com/${{ github.repository }}/.github/workflows/cd-build.yml" \
+              --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
+              "${REGISTRY}/${IMAGE}:${SHA_TAG}"
+          done
+
+      - name: Deploy Discovery
+        run: |
+          helm upgrade --install sentinel-discovery infra/helm/discovery \
+            --namespace sentinel-dev \
+            --create-namespace \
+            --values infra/helm/discovery/values-dev.yaml \
+            --set image.tag=${{ steps.tags.outputs.sha }} \
+            --atomic \
+            --timeout 5m
+
+      - name: Deploy Sentinel
+        run: |
+          helm upgrade --install sentinel-node infra/helm/sentinel \
+            --namespace sentinel-dev \
+            --create-namespace \
+            --values infra/helm/sentinel/values.yaml \
+            --set image.tag=${{ steps.tags.outputs.sha }} \
+            --atomic \
+            --timeout 5m
+
+      - name: Run smoke tests
+        run: bash tests/smoke/smoke_test.sh
+        env:
+          SMOKE_BASE_URL: https://dev.discovery.internal
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "Dev deployment failed — rolling back"
+          helm rollback sentinel-discovery --namespace sentinel-dev || true
+          helm rollback sentinel-node --namespace sentinel-dev || true
