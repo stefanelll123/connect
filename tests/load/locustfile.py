@@ -50,9 +50,26 @@ def _random_body(size: int) -> dict:
     return {"data": data, "ts": time.time()}
 
 
+# ── Base user: disable gzip so the sentinel proxy doesn't pass through a
+#    Content-Encoding: gzip header on an already-decompressed body. ──────────
+
+class SentinelUser(HttpUser):
+    """Base class — disables Accept-Encoding so responses are plain JSON."""
+
+    abstract = True
+
+    def on_start(self) -> None:
+        # The consumer sentinel decompresses the upstream gzip response but
+        # keeps the Content-Encoding: gzip header, causing requests (used by
+        # Locust) to try to double-decompress and fail.  Sending
+        # Accept-Encoding: identity prevents the mock-backend from gzip-ing
+        # in the first place.
+        self.client.headers["Accept-Encoding"] = "identity"
+
+
 # ── Phase A User ──────────────────────────────────────────────────────────────
 
-class PhaseAUser(HttpUser):
+class PhaseAUser(SentinelUser):
     """
     Experiment (a) — Phase A latency.
 
@@ -92,7 +109,7 @@ class PhaseAUser(HttpUser):
 
 # ── Phase B User ──────────────────────────────────────────────────────────────
 
-class PhaseBUser(HttpUser):
+class PhaseBUser(SentinelUser):
     """
     Experiment (a) — Phase B latency (session-token fast-path).
 
@@ -126,7 +143,7 @@ class PhaseBUser(HttpUser):
 
 # ── Throughput User ───────────────────────────────────────────────────────────
 
-class ThroughputUser(HttpUser):
+class ThroughputUser(SentinelUser):
     """
     Experiment (b) — Throughput-vs-concurrency characterisation.
 
