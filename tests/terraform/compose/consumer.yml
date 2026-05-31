@@ -9,7 +9,7 @@ services:
     environment:
       SENTINEL_ROLE: consumer
       SERVICE_ID: aws-sentinel-consumer
-      SENTINEL_ENV: loadtest
+      SENTINEL_ENV: dev
       SENTINEL_HOME: /data
       SENTINEL_PASSPHRASE: ${SENTINEL_PASSPHRASE}
       DATABASE_URL: postgresql+asyncpg://sentinel_user:${POSTGRES_PASSWORD}@${HUB_PRIVATE_IP}:5432/sentinel_db

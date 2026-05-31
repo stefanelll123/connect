@@ -11,7 +11,7 @@ services:
       BACKEND_URL: http://mock-backend:9000
       INBOUND_URL: http://${PRODUCER_PRIVATE_IP}:8080
       SERVICE_ID: aws-sentinel-producer
-      SENTINEL_ENV: loadtest
+      SENTINEL_ENV: dev
       SENTINEL_HOME: /data
       SENTINEL_PASSPHRASE: ${SENTINEL_PASSPHRASE}
       DATABASE_URL: postgresql+asyncpg://sentinel_user:${POSTGRES_PASSWORD}@${HUB_PRIVATE_IP}:5432/sentinel_db
