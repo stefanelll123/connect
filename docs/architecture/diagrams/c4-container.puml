@@ -1,0 +1,53 @@
+@startuml c4-container
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+LAYOUT_WITH_LEGEND()
+
+title Container Diagram — Sentinel Identity Platform [C4 Level 2]
+
+System_Boundary(gov_a, "Government Entity A") {
+    Container(consumer_svc, "Consumer Service", "Python/Any", "Business app that calls Producer APIs")
+    Container(consumer_sentinel, "Consumer Sentinel", "Python / FastAPI", "Forward proxy: assembles VP + ProofClaims, injects headers")
+    ContainerDb(consumer_vault, "Vault (Consumer)", "HashiCorp Vault", "Stores Consumer Sentinel Ed25519 private key")
+}
+
+System_Boundary(gov_b, "Government Entity B") {
+    Container(producer_svc, "Producer Service", "Python/Any", "Business app that exposes data APIs")
+    Container(producer_sentinel, "Producer Sentinel", "Python / FastAPI", "Reverse proxy: verifies VP + ProofClaims, enforces policy")
+    ContainerDb(producer_vault, "Vault (Producer)", "HashiCorp Vault", "Stores Producer Sentinel Ed25519 private key")
+    ContainerDb(sentinel_redis, "Redis", "Redis 7", "JTI replay cache, status list cache, Sentinel state")
+}
+
+System_Boundary(central, "Central Infrastructure") {
+    Container(discovery, "Discovery Service", "Python / FastAPI", "DID registry, VC issuer, config orchestrator, status list manager")
+    ContainerDb(discovery_db, "PostgreSQL", "PostgreSQL 14", "Services, Sentinels, VCs, enrollment tokens, audit log")
+    ContainerDb(discovery_redis, "Redis", "Redis 7", "Rate limiting, enrollment token blacklist, cache")
+}
+
+System_Boundary(blockchain_layer, "Blockchain Trust Layer") {
+    Container(sentinel_registry, "SentinelRegistry", "Solidity 0.8.24", "Sentinel DID registration")
+    Container(issuer_registry, "IssuerRegistry", "Solidity 0.8.24", "Authorized VC issuers")
+    Container(trust_policy, "TrustPolicyRegistry", "Solidity 0.8.24", "Policy params (Δ, allowed algs)")
+    Container(status_anchor, "StatusListAnchor", "Solidity 0.8.24", "SHA-256 anchors for status lists")
+}
+
+Rel(consumer_svc, consumer_sentinel, "Outbound HTTP (intercepted)", "HTTP")
+Rel(consumer_sentinel, producer_sentinel, "Proxied request + SentinelProof + SentinelVP", "HTTPS")
+Rel(consumer_sentinel, consumer_vault, "Read private key for signing", "Vault API / TLS")
+Rel(consumer_sentinel, discovery, "Pull config bundle, fetch VC", "HTTPS/mTLS")
+
+Rel(producer_sentinel, producer_svc, "Proxied request (after verification)", "HTTP")
+Rel(producer_sentinel, producer_vault, "Read private key", "Vault API / TLS")
+Rel(producer_sentinel, sentinel_redis, "JTI dedup, status list cache", "Redis protocol/TLS")
+Rel(producer_sentinel, discovery, "Pull config bundle", "HTTPS/mTLS")
+Rel(producer_sentinel, issuer_registry, "Check issuer liveness", "JSON-RPC/TLS")
+Rel(producer_sentinel, trust_policy, "Read policy (Δ)", "JSON-RPC/TLS")
+
+Rel(discovery, discovery_db, "CRUD services, VCs, audit", "asyncpg/TLS")
+Rel(discovery, discovery_redis, "Rate limit, token blacklist", "Redis/TLS")
+Rel(discovery, sentinel_registry, "Register/update Sentinels", "JSON-RPC/TLS")
+Rel(discovery, issuer_registry, "Enable/disable issuers", "JSON-RPC/TLS")
+Rel(discovery, status_anchor, "Anchor status list hash", "JSON-RPC/TLS")
+
+SHOW_LEGEND()
+@enduml

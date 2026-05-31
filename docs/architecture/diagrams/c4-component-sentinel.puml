@@ -1,0 +1,50 @@
+@startuml c4-component-sentinel
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml
+
+LAYOUT_WITH_LEGEND()
+
+title Component Diagram — Sentinel (Producer or Consumer) [C4 Level 3]
+
+Container_Boundary(sentinel, "Sentinel Service") {
+
+    Component(proxy_layer, "Proxy Layer", "FastAPI / HTTPX", "Intercepts inbound (Producer) or outbound (Consumer) HTTP requests")
+    Component(proof_builder, "ProofClaims Builder", "Python", "[Consumer] Builds and signs ProofClaims JWS over method/path/query/body")
+    Component(vp_assembler, "VP Assembler", "Python", "[Consumer] Assembles JWT-VP from stored VC; injects SentinelVP header")
+    Component(proof_verifier, "VP + ProofClaims Verifier", "Python", "[Producer] Verifies ProofClaims JWS and JWT-VP (10-step procedure)")
+    Component(policy_engine, "Policy Engine", "Python", "[Producer] Checks scope, env, aud; enforces access rules")
+    Component(revocation_mgr, "Revocation Manager", "Python", "Downloads, caches, and verifies Bitstring Status List; checks staleness Δ")
+    Component(issuer_cache, "Issuer Registry Cache", "Python + Redis", "Caches IssuerRegistry on-chain reads; refreshes on TTL")
+    Component(jti_cache, "JTI Replay Cache", "Redis", "[Producer] Deduplicates ProofClaims JTIs within exp window")
+    Component(config_puller, "Config Puller", "Python", "Periodically fetches and verifies signed config bundle from Discovery")
+    Component(key_mgr, "Key Manager", "Python + hvac", "Loads Ed25519 private key from Vault at startup; renews lease")
+    Component(audit_emitter, "Audit Emitter", "structlog", "Emits structured JSON audit log on every decision")
+    Component(health_api, "Health API", "/health/live + /health/ready", "Kubernetes liveness and readiness probes")
+}
+
+ContainerDb(vault, "Vault", "HashiCorp Vault", "Private key storage")
+ContainerDb(redis, "Redis", "Redis 7", "JTI cache, status list cache, Sentinel state")
+System_Ext(discovery, "Discovery Service", "Config bundles, VCs, status lists")
+System_Ext(blockchain, "Blockchain", "IssuerRegistry, TrustPolicyRegistry")
+
+Rel(proxy_layer, proof_verifier, "[Producer] Verify ProofClaims + VP")
+Rel(proxy_layer, proof_builder, "[Consumer] Build + sign ProofClaims")
+Rel(proxy_layer, vp_assembler, "[Consumer] Assemble VP")
+
+Rel(proof_verifier, policy_engine, "Pass verified claims")
+Rel(proof_verifier, revocation_mgr, "Check revocation status")
+Rel(proof_verifier, issuer_cache, "Check issuer liveness")
+Rel(proof_verifier, jti_cache, "Deduplicate JTI")
+
+Rel(revocation_mgr, redis, "Cache status list")
+Rel(revocation_mgr, blockchain, "Verify hash anchor")
+Rel(issuer_cache, redis, "Cache issuer state")
+Rel(issuer_cache, blockchain, "Read IssuerRegistry")
+
+Rel(proxy_layer, audit_emitter, "Emit decision event")
+Rel(key_mgr, vault, "Read private key; renew lease")
+Rel(config_puller, discovery, "GET /config (mTLS)")
+Rel(proof_builder, key_mgr, "Get signing key")
+Rel(proof_verifier, key_mgr, "Get verification key (for own VP signing check)")
+
+SHOW_LEGEND()
+@enduml

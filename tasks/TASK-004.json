@@ -1,0 +1,186 @@
+{
+  "id": "TASK-004",
+  "title": "Credential Schema Definitions (VC) and Policy Model (ABAC/Capability) with Environment Binding",
+  "component": "security",
+  "status": "not-started",
+  "description": "Design credential types and minimal claims for: Sentinel identity, service-Sentinel binding, consumer-to-producer access rights, issuer trust, and revocation status references. Implement as Pydantic v2 models with JSON Schema export. Include environment binding (dev/test/prod) as a first-class requirement on every credential type.",
+  "objectives": [
+    "Define clear, minimal VCs — separate types for identity vs. access grants",
+    "Standardize claims (aud, env, scope, exp/nbf, status) for deterministic verification",
+    "Define the policy evaluation contract at Producer Sentinel"
+  ],
+  "implementation_guidance": {
+    "overview": "Implement the credential type system as Pydantic v2 models in libs/common/vc_schemas. Each model must be serializable to/from JWT claims, have full field validation, and export a JSON Schema. Define the PolicyEvaluator interface used by the Producer Sentinel.",
+    "steps": [
+      "Step 1 - SentinelIdentityCredential Definition: This VC attests the DID, role, and service binding of a Sentinel. JWT claims: iss (Discovery DID), sub (Sentinel DID), nbf, exp (max: 365 days), jti (UUID), vc.type=['VerifiableCredential','SentinelIdentityCredential'], vc.credentialSubject.id = Sentinel DID, vc.credentialSubject.role = 'PRODUCER'|'CONSUMER', vc.credentialSubject.service_id = string (max 128 chars, pattern: ^[a-z0-9_-]+$), vc.credentialSubject.env = 'dev'|'test'|'prod', credentialStatus pointer.",
+      "Step 2 - ServiceBindingCredential Definition: This VC attests that a Sentinel DID is authorized to represent a specific service in a specific environment. JWT claims: iss (Service Owner authority DID), sub (Sentinel DID), vc.type=['VerifiableCredential','ServiceBindingCredential'], vc.credentialSubject.sentinel_did = Sentinel DID, vc.credentialSubject.service_id = string, vc.credentialSubject.env = 'dev'|'test'|'prod', vc.credentialSubject.valid_endpoint_patterns = array<string> (URL patterns, max 20). Max exp: 90 days for prod.",
+      "Step 3 - AccessGrantCredential Definition: This VC grants a consumer Sentinel access to producer services. JWT claims: iss (Producer authority DID or Discovery DID), sub (Consumer Sentinel DID), aud (Producer Service DID — REQUIRED), vc.type=['VerifiableCredential','AccessGrantCredential'], vc.credentialSubject.id = Consumer Sentinel DID, vc.credentialSubject.aud = Producer Service DID, vc.credentialSubject.env = 'dev'|'test'|'prod', vc.credentialSubject.scope = array<ScopeEntry>, vc.credentialSubject.max_requests_per_minute = integer|null, credentialStatus pointer. Max exp: 30 days for prod.",
+      "Step 4 - ScopeEntry Model: A scope entry defines the exact resource and action a consumer is allowed to perform. Fields: service_id (string, required), path_glob (string, e.g. '/api/v1/citizens/**', max 256 chars), methods (array of 'GET'|'POST'|'PUT'|'PATCH'|'DELETE'), attributes (optional, array<string> for ABAC attribute constraints). Scope wildcard rules: wildcards (**) are only allowed if consumer role is TRUSTED_INTEGRATOR. In prod, single-level wildcards (*) are allowed for path segments. Double wildcards (**) require security-admin approval.",
+      "Step 5 - Pydantic Model Implementation: Create Python files in libs/common/vc_schemas/. Each credential type gets its own module. Base class VCCredentialSubject contains common validators. Use Pydantic Field with constraints. Export JSON Schema using model.model_json_schema(). Example for AccessGrantCredential subject: class AccessGrantSubject(BaseModel): id: str = Field(pattern=r'^did:', max_length=512); aud: str = Field(pattern=r'^did:', max_length=512); env: Literal['dev','test','prod']; scope: List[ScopeEntry] = Field(min_length=1, max_length=50); max_requests_per_minute: Optional[int] = Field(default=None, ge=1, le=10000).",
+      "Step 6 - Policy Evaluation Contract: Define the PolicyEvaluator protocol (ABC/Protocol). Input dataclass: PolicyRequest(consumer_did: str, vc_set: list[VerifiedVC], resource: str, method: str, env: str, context: RequestContext). Output dataclass: PolicyDecision(result: Literal['PERMIT','DENY'], reason_code: str, matched_rule_id: str|None, missing_scopes: list[str]). Evaluation algorithm: (1) Check all VCs are valid (not expired, not revoked, signature valid). (2) Find AccessGrantCredential for consumer_did with aud matching producer DID. (3) Find matching scope entry for resource+method. (4) Verify env matches. (5) If all pass → PERMIT. If any fails → DENY with specific reason_code.",
+      "Step 7 - Composition Rules for Multiple VCs: When a consumer presents multiple VCs: (1) Most restrictive policy wins — the effective scope is the INTERSECTION of scopes across all relevant VCs. (2) If any critical check fails (revoked VC, invalid signature, env mismatch) → DENY immediately. (3) Log which VC caused the denial (by jti hash, not full content). (4) Never merge scopes from VCs with different issuers unless both issuers are trusted and the composition rule is explicitly configured."
+    ],
+    "project_structure": {
+      "files": [
+        "libs/common/vc_schemas/__init__.py",
+        "libs/common/vc_schemas/base.py — base classes and common validators",
+        "libs/common/vc_schemas/sentinel_identity.py — SentinelIdentityCredential model",
+        "libs/common/vc_schemas/service_binding.py — ServiceBindingCredential model",
+        "libs/common/vc_schemas/access_grant.py — AccessGrantCredential + ScopeEntry models",
+        "libs/common/vc_schemas/policy.py — PolicyEvaluator protocol, PolicyRequest, PolicyDecision",
+        "libs/common/vc_schemas/schemas/ — exported JSON Schema files",
+        "libs/common/vc_schemas/schemas/SentinelIdentityCredential.v1.schema.json",
+        "libs/common/vc_schemas/schemas/ServiceBindingCredential.v1.schema.json",
+        "libs/common/vc_schemas/schemas/AccessGrantCredential.v1.schema.json",
+        "tests/unit/vc_schemas/test_sentinel_identity.py",
+        "tests/unit/vc_schemas/test_service_binding.py",
+        "tests/unit/vc_schemas/test_access_grant.py",
+        "tests/unit/vc_schemas/test_policy_evaluator.py"
+      ]
+    },
+    "domain_entities": {
+      "SentinelIdentityCredentialSubject": {
+        "fields": [
+          "id: str — Sentinel DID (required, pattern: ^did:)",
+          "role: Literal['PRODUCER', 'CONSUMER'] — required",
+          "service_id: str — required, pattern: ^[a-z0-9_-]{1,128}$",
+          "env: Literal['dev', 'test', 'prod'] — required",
+          "instance_count_hint: Optional[int] — maximum expected instances (informational only)"
+        ]
+      },
+      "ServiceBindingCredentialSubject": {
+        "fields": [
+          "sentinel_did: str — required",
+          "service_id: str — required",
+          "env: Literal['dev', 'test', 'prod'] — required",
+          "valid_endpoint_patterns: Optional[List[str]] — max 20 items, each max 512 chars"
+        ]
+      },
+      "AccessGrantCredentialSubject": {
+        "fields": [
+          "id: str — Consumer Sentinel DID (required)",
+          "aud: str — Producer Service DID (required)",
+          "env: Literal['dev', 'test', 'prod'] — required",
+          "scope: List[ScopeEntry] — min 1, max 50 entries",
+          "max_requests_per_minute: Optional[int] — rate limit hint, 1-10000"
+        ]
+      },
+      "ScopeEntry": {
+        "fields": [
+          "service_id: str — required, pattern: ^[a-z0-9_-]{1,128}$",
+          "path_glob: str — required, e.g. /api/v1/citizens/*, max 256 chars",
+          "methods: List[str] — subset of [GET, POST, PUT, PATCH, DELETE], min 1",
+          "attributes: Optional[List[str]] — ABAC attribute constraints, max 20 items"
+        ]
+      },
+      "CredentialStatus": {
+        "fields": [
+          "id: str — URL with index fragment e.g. https://discovery.example.gov/status/list-001#42",
+          "type: Literal['BitstringStatusListEntry']",
+          "statusListIndex: str — string representation of integer",
+          "statusListCredential: str — URL to the status list VC",
+          "statusPurpose: Literal['revocation', 'suspension']"
+        ]
+      }
+    },
+    "data_structures": {
+      "sentinel_identity_vc_example": {
+        "iss": "did:key:z6MkDiscoveryServiceDID",
+        "sub": "did:key:z6MkSentinelProducerDID",
+        "nbf": 1741910400,
+        "exp": 1773446400,
+        "jti": "urn:uuid:11111111-2222-3333-4444-555555555555",
+        "vc": {
+          "type": ["VerifiableCredential", "SentinelIdentityCredential"],
+          "credentialSubject": {
+            "id": "did:key:z6MkSentinelProducerDID",
+            "role": "PRODUCER",
+            "service_id": "citizen-data-service",
+            "env": "prod"
+          },
+          "credentialStatus": {
+            "id": "https://discovery.example.gov/status/list-001#1",
+            "type": "BitstringStatusListEntry",
+            "statusListIndex": "1",
+            "statusListCredential": "https://discovery.example.gov/status/list-001",
+            "statusPurpose": "revocation"
+          }
+        }
+      },
+      "access_grant_vc_example": {
+        "iss": "did:key:z6MkProducerAuthorityDID",
+        "sub": "did:key:z6MkConsumerSentinelDID",
+        "nbf": 1741910400,
+        "exp": 1744588800,
+        "jti": "urn:uuid:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        "vc": {
+          "type": ["VerifiableCredential", "AccessGrantCredential"],
+          "credentialSubject": {
+            "id": "did:key:z6MkConsumerSentinelDID",
+            "aud": "did:key:z6MkProducerServiceDID",
+            "env": "prod",
+            "scope": [
+              {
+                "service_id": "citizen-data-service",
+                "path_glob": "/api/v1/citizens/*",
+                "methods": ["GET"],
+                "attributes": null
+              }
+            ],
+            "max_requests_per_minute": 100
+          },
+          "credentialStatus": {
+            "id": "https://discovery.example.gov/status/list-002#42",
+            "type": "BitstringStatusListEntry",
+            "statusListIndex": "42",
+            "statusListCredential": "https://discovery.example.gov/status/list-002",
+            "statusPurpose": "revocation"
+          }
+        }
+      },
+      "policy_decision_example": {
+        "result": "DENY",
+        "reason_code": "SCOPE_INSUFFICIENT",
+        "matched_rule_id": null,
+        "missing_scopes": ["citizen-data-service:/api/v1/citizens/*/documents:GET"]
+      }
+    },
+    "error_handling": {
+      "policy_evaluation_reason_codes": [
+        {"code": "NO_MATCHING_VC", "description": "No AccessGrantCredential found for the consumer DID"},
+        {"code": "VC_EXPIRED", "description": "The matching VC has expired"},
+        {"code": "VC_REVOKED", "description": "The matching VC is revoked in status list"},
+        {"code": "ENV_MISMATCH", "description": "VC env does not match request environment"},
+        {"code": "AUD_MISMATCH", "description": "VC aud does not match producer DID"},
+        {"code": "SCOPE_INSUFFICIENT", "description": "No scope entry covers the requested resource+method"},
+        {"code": "ISSUER_UNTRUSTED", "description": "VC issuer is not in IssuerRegistry"},
+        {"code": "STATUS_STALE", "description": "Status list is stale beyond Δ — fail-closed mode active"}
+      ]
+    },
+    "security_constraints": [
+      "env claim MUST be validated both in the VC credentialSubject AND in the ProofClaims JWT — two independent checks",
+      "aud claim in AccessGrantCredential MUST exactly match the Producer Sentinel DID — no prefix/suffix matching",
+      "scope wildcards (**) in production require explicit security-admin approval and must be stored with an approval_reference in the VC metadata",
+      "VCs from different issuers MUST NOT have their scopes merged unless explicitly configured — intersection is the default",
+      "CredentialStatus MUST be present in every AccessGrantCredential — VCs without a status pointer MUST be rejected"
+    ]
+  },
+  "technical_requirements": [
+    "Python 3.11+",
+    "Pydantic v2",
+    "W3C VC Data Model v2.0",
+    "W3C Bitstring Status List v1.0",
+    "JWT-VC/JWT-VP via VC-JOSE-COSE"
+  ],
+  "dependencies": [
+    "TASK-003"
+  ],
+  "acceptance_criteria": [
+    "Pydantic models and JSON Schemas exist for all 3 VC types: SentinelIdentityCredential, ServiceBindingCredential, AccessGrantCredential",
+    "Each model has full field validation with correct types, required/optional flags, and value constraints",
+    "PolicyEvaluator protocol is defined with PolicyRequest and PolicyDecision types",
+    "Policy evaluation rules are documented: most-restrictive wins, deny on any critical failure",
+    "Unit tests cover: valid VC, expired VC, env mismatch, aud mismatch, scope match, scope mismatch, wildcard rules",
+    "JSON Schema files are exported and loadable by external validators"
+  ]
+}

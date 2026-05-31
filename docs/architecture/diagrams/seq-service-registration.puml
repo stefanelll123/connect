@@ -1,0 +1,32 @@
+@startuml seq-service-registration
+title Service Registration Flow
+
+actor "Admin (Entity A)" as admin
+participant "Discovery API" as disc
+participant "Discovery DB" as db
+participant "IssuerRegistry\n(Blockchain)" as chain
+
+== Register Producer Service ==
+
+admin -> disc: POST /api/v1/services\n{\n  "service_id": "citizen-data",\n  "role": "PRODUCER",\n  "entity_id": "RO-MFP",\n  "env": "prod",\n  "base_url": "https://services.mfp.gov.ro/citizen"\n}\nAuthorization: Bearer <admin-api-key>
+disc -> disc: Validate payload\nCheck service_id uniqueness
+disc -> db: INSERT services\n{service_id, role, entity_id, env, base_url, status=PENDING}
+
+disc -> chain: issuerRegistry.isActive(admin_did)
+chain --> disc: true (admin is authorized)
+
+disc -> chain: sentinelRegistry.registerService\n(service_id, entity_id, env, role_hash)
+chain --> disc: txHash
+
+disc -> db: UPDATE services SET status=ACTIVE,\ntx_hash=<txHash>
+disc -> db: INSERT audit_log\n{action=SERVICE_REGISTERED, actor=admin_did, target=service_id}
+
+disc --> admin: 201 Created\n{\n  "service_id": "citizen-data",\n  "did": null,\n  "status": "ACTIVE",\n  "enrollment_token_endpoint": "/api/v1/sentinels/enroll"\n}
+
+== Verify Registration ==
+
+admin -> disc: GET /api/v1/services/citizen-data
+disc -> db: SELECT * FROM services WHERE service_id='citizen-data'
+disc --> admin: 200 OK\n{ "service_id": "citizen-data", "status": "ACTIVE", ... }
+
+@enduml

@@ -1,0 +1,147 @@
+{
+  "id": "TASK-007",
+  "title": "Revocation and Status Mechanism with Bitstring Status List and Bounded-Freshness Delta (Δ)",
+  "component": "security",
+  "status": "not-started",
+  "description": "Define how credential status is published, distributed, verified, and cached using W3C Bitstring Status List v1.0 and a bounded-freshness guarantee parameter Δ. Define on-chain anchoring for tamper evidence, staleness policies, and the emergency revocation path.",
+  "objectives": [
+    "Scalable, verifiable revocation using bitstring status lists",
+    "Staleness control via Δ with fail-closed/degrade policies",
+    "On-chain anchoring for tamper evidence (hash + timestamp anchor)"
+  ],
+  "implementation_guidance": {
+    "overview": "The revocation mechanism operates as follows: Discovery maintains Bitstring Status Lists as signed JWT-VCs served over HTTPS. Each VC references a statusListIndex in a specific statusListCredential. Producer Sentinels cache status lists and verify them using on-chain hash anchors. The Δ parameter bounds how stale a cached status list can be before enforcement mode changes.",
+    "steps": [
+      "Step 1 - Bitstring Status List Credential Structure: A StatusListCredential is a JWT-VC with type ['VerifiableCredential','BitstringStatusListCredential']. JWT payload: iss (Discovery DID), sub (same URL as status list ID), jti (UUID v4), iat, exp (iat + list_validity_seconds, default 1 day), vc.type as above, vc.credentialSubject.id (URL), vc.credentialSubject.type 'BitstringStatusList', vc.credentialSubject.statusPurpose ('revocation'|'suspension'), vc.credentialSubject.encodedList (base64url of gzip-compressed bitstring). The bitstring has one bit per credential index. Bit = 1 means revoked.",
+      "Step 2 - StatusListCredential naming: Use URL pattern https://discovery.example.gov/api/v1/status/{status_list_id} where status_list_id is a UUID. Each issuer and credential type combo gets its own status list (to limit blast radius). Maximum credentials per status list: 131072 (2^17 bits = 16KB compressed).",
+      "Step 3 - VC Status Reference: Each VC (specifically AccessGrantCredential) includes a credentialStatus claim: {id: '<status_list_url>#<index>', type: 'BitstringStatusListEntry', statusListIndex: '<integer_as_string>', statusListCredential: '<status_list_url>', statusPurpose: 'revocation'}. The index is assigned at VC issuance time and stored in the DB.",
+      "Step 4 - Status List Serve Endpoint: GET /api/v1/status/{status_list_id} is PUBLIC (no auth required). Returns the StatusListCredential JWT (content-type: application/vc+jwt). HTTP cache headers: Cache-Control: public, max-age={delta_seconds}, must-revalidate. Last-Modified and ETag based on last update timestamp.",
+      "Step 5 - Delta (Δ) Definition and Configuration: Δ is the maximum age of the cached status list anchor before Producer Sentinels must enter stale mode. Configuration values by environment: prod_delta_seconds=600 (10 min), test_delta_seconds=1800 (30 min), dev_delta_seconds=3600 (1 hour). These values are stored in TrustPolicyRegistry on-chain (TASK-015) and also in the Sentinel config bundle. On-chain values take precedence.",
+      "Step 6 - Staleness Mode Behavior: When Producer Sentinel detects stale status (now - last_anchor_updatedAt > Δ): Mode FAIL_CLOSED (default) — reject ALL requests with 503 STATUS_STALE_FAIL_CLOSED; Mode FAIL_OPEN_DEGRADED — allow only requests with scope limited to read-only operations; Mode ALLOW_WITH_WARNING — allow all but log warning + increment metric status_stale_requests_total. Mode is configured per environment in config bundle. Default is FAIL_CLOSED for prod.",
+      "Step 7 - On-Chain Anchoring: After Discovery publishes a new status list, it writes to StatusRegistry contract (TASK-016): publishStatusAnchor(statusListId=keccak256(url), rootHash=SHA256(jwt_bytes), updatedAt=block.timestamp_override_or_now). Sentinel reads the anchor: get_status_anchor(statusListId) → {rootHash, updatedAt, issuerId}. Sentinel verifies: SHA256(downloaded_status_list_jwt) == anchor.rootHash. If mismatch → reject as TAMPERED.",
+      "Step 8 - Emergency Revocation Path: For compromised high-value credentials, Discovery can call StatusRegistry.emergencyRevoke(credentialIdHash=keccak256(jti)) directly on-chain. Sentinels check this mapping on every VC verification: is_emergency_revoked(credentialIdHash) → bool. This path bypasses the status list. Cost: one on-chain write per credential. Restricted to security-admin role.",
+      "Step 9 - Cache Architecture at Sentinel: Sentinel maintains: (1) in-memory cache of decoded status list bitstrings, indexed by statusListId, (2) persistent cache copy in encrypted local storage for restart recovery, (3) last_anchor {rootHash, updatedAt} per statusListId cached from chain for freshness comparison. Refresh scheduler runs at Δ/2 interval with ±10% jitter to prevent thundering herd.",
+      "Step 10 - Status Verification Procedure (at Sentinel for each VC): (1) Extract credentialStatus.statusListCredential URL and statusListIndex. (2) Derive statusListId = keccak256(URL). (3) Check in-memory cache freshness: if cache_age > Δ → trigger refresh and get_anchor. (4) Get anchor from chain client cache (TASK-042). (5) If anchor.updatedAt > cached_download_time → download fresh status list. (6) Verify downloaded status list JWT signature. (7) Verify SHA256(jwt_bytes) == anchor.rootHash. (8) Decompress bitstring, check bit at statusListIndex. (9) If bit == 1 → return STATUS_REVOKED. (10) Check emergency revoke for credentialIdHash. (11) Return NOT_REVOKED."
+    ],
+    "project_structure": {
+      "files": [
+        "docs/protocols/revocation-mechanism.md — full specification",
+        "libs/common/revocation/__init__.py",
+        "libs/common/revocation/bitstring.py — bitstring encode/decode/check",
+        "libs/common/revocation/models.py — StatusListCredential, CredentialStatus models",
+        "libs/common/revocation/cache.py — StatusListCache with TTL and disk persistence",
+        "libs/common/revocation/verifier.py — status verification procedure",
+        "tests/unit/revocation/test_bitstring.py",
+        "tests/unit/revocation/test_cache.py",
+        "tests/unit/revocation/test_verifier.py"
+      ]
+    },
+    "domain_entities": {
+      "StatusListCredential": {
+        "description": "JWT-VC containing the revocation bitstring",
+        "fields": [
+          "status_list_id: str(UUID) — unique identifier",
+          "url: str — the HTTPS URL where this is served",
+          "issuer_did: str — the DID of the issuer (Discovery)",
+          "status_purpose: Literal['revocation', 'suspension']",
+          "encoded_list: str — base64url(gzip(bitstring))",
+          "credential_count: int — total capacity of this list",
+          "issued_at: datetime",
+          "expires_at: datetime",
+          "jwt_bytes: bytes — the raw signed JWT for hash verification"
+        ]
+      },
+      "StatusListCache": {
+        "description": "Sentinel-side cache entry for a status list",
+        "fields": [
+          "status_list_id: str",
+          "bitstring: bytes — decoded and decompressed",
+          "root_hash: str — SHA256 hex of jwt_bytes",
+          "anchor_updated_at: int — Unix timestamp from on-chain anchor",
+          "downloaded_at: datetime",
+          "is_stale: bool — computed: now - anchor_updated_at > delta",
+          "stale_mode: Literal['FAIL_CLOSED', 'FAIL_OPEN_DEGRADED', 'ALLOW_WITH_WARNING']"
+        ]
+      }
+    },
+    "data_structures": {
+      "status_list_credential_example": {
+        "iss": "did:key:z6MkDiscoveryDID",
+        "sub": "https://discovery.example.gov/api/v1/status/list-001",
+        "jti": "urn:uuid:status-list-uuid-1",
+        "iat": 1741910400,
+        "exp": 1741996800,
+        "vc": {
+          "type": ["VerifiableCredential", "BitstringStatusListCredential"],
+          "credentialSubject": {
+            "id": "https://discovery.example.gov/api/v1/status/list-001",
+            "type": "BitstringStatusList",
+            "statusPurpose": "revocation",
+            "encodedList": "H4sIAAAAAAAAA-3BMQEAAADCoPVP7WsIoAAAAAAAAAAAAAAAAAAAeAMBAAD__wMAAAD_"
+          }
+        }
+      },
+      "anchor_record": {
+        "statusListId": "0x1234abcd...keccak256_of_url",
+        "rootHash": "0xabcdef1234...sha256_of_jwt",
+        "updatedAt": 1741910400,
+        "issuerId": "0x5678...keccak256_of_issuer_did"
+      }
+    },
+    "api_endpoints": {
+      "get_status_list": {
+        "method": "GET",
+        "path": "/api/v1/status/{status_list_id}",
+        "auth": "None (public endpoint)",
+        "response_headers": {
+          "Content-Type": "application/vc+jwt",
+          "Cache-Control": "public, max-age=600, must-revalidate",
+          "ETag": "W/\"<hash_of_jwt>\"",
+          "Last-Modified": "HTTP date format"
+        },
+        "responses": {
+          "200": "StatusListCredential JWT string",
+          "304": "Not Modified (if If-None-Match matches ETag)",
+          "404": "STATUS_LIST_NOT_FOUND"
+        }
+      }
+    },
+    "error_handling": {
+      "revocation_check_errors": [
+        {"code": "STATUS_REVOKED", "http_status": 403, "description": "Credential bitstring bit is set to revoked"},
+        {"code": "EMERGENCY_REVOKED", "http_status": 403, "description": "Credential is emergency-revoked on-chain"},
+        {"code": "STATUS_STALE_FAIL_CLOSED", "http_status": 503, "description": "Status list is stale beyond Δ and mode is FAIL_CLOSED"},
+        {"code": "STATUS_HASH_MISMATCH", "http_status": 403, "description": "SHA256 of downloaded status list does not match on-chain anchor"},
+        {"code": "STATUS_INDEX_OUTOFRANGE", "http_status": 400, "description": "statusListIndex is outside the bitstring size"},
+        {"code": "STATUS_LIST_UNAVAILABLE", "http_status": 502, "description": "Status list URL unreachable and cache is stale"}
+      ]
+    },
+    "security_constraints": [
+      "Status list download MUST verify the JWT signature before trusting content",
+      "Hash mismatch between downloaded status list and on-chain anchor MUST cause immediate rejection with TAMPERED code",
+      "Emergency revoke check MUST happen on every VC verification — cannot be cached beyond the anchor TTL",
+      "FAIL_CLOSED is the mandatory default for prod environments — FAIL_OPEN modes require explicit configuration with documented risk acceptance",
+      "Status list rollback (serving an older list) is detected by comparing anchor.updatedAt monotonically — if anchor shows newer timestamp but served list is older → TAMPERED"
+    ]
+  },
+  "technical_requirements": [
+    "W3C Bitstring Status List v1.0",
+    "W3C VC Data Model v2.0",
+    "HTTPS for distribution with proper cache headers",
+    "gzip compression for bitstring encoding",
+    "SHA-256 for root hash computation"
+  ],
+  "dependencies": [
+    "TASK-003",
+    "TASK-004"
+  ],
+  "acceptance_criteria": [
+    "Bitstring encode/decode/check utilities are implemented and tested",
+    "StatusListCache with TTL enforcement is implemented",
+    "Staleness detection (now - anchor_updated_at > Δ) is implemented and triggers configured mode",
+    "FAIL_CLOSED mode rejects all requests when status is stale",
+    "Hash mismatch between downloaded status list and on-chain anchor causes rejection",
+    "Emergency revoke path is implemented and tested",
+    "Refresh scheduler runs at Δ/2 with jitter"
+  ]
+}

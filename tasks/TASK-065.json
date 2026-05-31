@@ -1,0 +1,109 @@
+{
+  "id": "TASK-065",
+  "title": "E2E Test Harness and Resilience Tests: Full-Stack Docker Compose, Scenario Tests, Outage/Compromise Simulations, Metrics Report",
+  "component": "tests/e2e",
+  "status": "pending",
+  "description": "Build a comprehensive end-to-end test harness using docker-compose as the test environment (no Kubernetes required). Cover the full sentinel lifecycle: onboarding, VC issuance, request authorization (permit/deny), revocation with Δ enforcement, replay rejection, and resilience scenarios (RPC node outage, Discovery downtime, issuer compromise). Produce a structured report with latency percentiles, success rates, and time-to-containment metrics.",
+  "objectives": [
+    "docker-compose test stack: all services + local blockchain (Hardhat node) + Vault dev mode",
+    "E2E scenario (a): full onboarding flow for a consumer and producer sentinel",
+    "E2E scenario (b): VC issuance by Discovery operator and sentinel credential store update",
+    "E2E scenario (c): authorized request — consumer → sentinel → producer → backend — end-to-end PERMIT",
+    "E2E scenario (d): revoke VC on-chain, wait Δ, verify consumer request rejected after Δ",
+    "E2E scenario (e): replay same SentinelProof jti — verify second attempt rejected with PROOF_ALREADY_SEEN",
+    "Outage test: stop Hardhat RPC node, verify sentinel degrades gracefully then fails closed after Δ",
+    "Outage test: stop Discovery service, verify producer rejects unauthorized requests",
+    "Compromise test: disable issuer on-chain, verify VCs from that issuer rejected immediately",
+    "Report: latency (p50/p95/p99), success rate, time-to-containment for revocation and compromise scenarios"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      {
+        "step": 1,
+        "title": "docker-compose test stack definition",
+        "detail": "File: `tests/e2e/docker-compose.e2e.yml`. Services: `hardhat-node` (image: ghcr.io/foundry-rs/foundry or custom `npm run node` — exposes RPC on 8545), `postgres` (14-alpine, DB: discovery_test), `redis` (7-alpine), `vault` (dev mode: `vault server -dev -dev-root-token-id=root`), `discovery` (built from source, env: TEST env vars), `sentinel-consumer` (mode: consumer, service_id: test-consumer), `sentinel-producer` (mode: producer, service_id: test-producer), `mock-backend` (simple Python HTTP server echoing requests — port 9000). Networks: `e2e_net`. All services on same bridge network. Healthcheck dependencies via `depends_on: condition: service_healthy` in compose. Startup order: postgres/redis/vault → discovery → sentinel-consumer → sentinel-producer → mock-backend."
+      },
+      {
+        "step": 2,
+        "title": "Test fixtures and helpers",
+        "detail": "File: `tests/e2e/conftest.py`. Pytest fixtures: `stack` (class-scoped): uses `subprocess.run(['docker', 'compose', '-f', 'docker-compose.e2e.yml', 'up', '-d', '--wait'])`, yield, then `docker compose down -v`. `discovery_client`: httpx.Client with Discovery base URL. `admin_token`: JWT obtained from Discovery API with operator credentials. `hardhat` fixture: web3.AsyncWeb3 connected to Hardhat RPC. `deploy_contracts` (session-scoped): run `npx hardhat run scripts/deploy.js --network localhost`, parse addresses, store in fixture. `consumer_sentinel` + `producer_sentinel`: httpx.Clients for each sentinel. Wait-for-ready helper: poll `/health/ready` with exponential backoff (max 30s)."
+      },
+      {
+        "step": 3,
+        "title": "Scenario (a): Full onboarding E2E",
+        "detail": "File: `tests/e2e/test_onboarding.py`. Test flow: (1) POST `/api/v1/sentinels/enroll` with valid DID and service profile → 201 PENDING. (2) Admin PATCH `/api/v1/sentinels/{id}/approve` → 200. (3) Sentinel `polls /api/v1/sentinels/bootstrap` → 200 with trust layer config and contract addresses. (4) Verify sentinel `/api/v1/health/ready` returns `did_initialized: true, trust_cache: populated`. (5) Verify sentinel registered on-chain: call `ServiceRegistry.getService(did)` on Hardhat node and confirm active. (6) Verify enrollment event recorded in Discovery `/api/v1/audit-log`. Assert full flow completes within 60 seconds from enroll to ready."
+      },
+      {
+        "step": 4,
+        "title": "Scenario (b): VC issuance",
+        "detail": "File: `tests/e2e/test_vc_issuance.py`. Test: (1) POST Discovery `/api/v1/credentials/issue` with consumer DID, producer service_id, scopes=['read', 'write'], expiry=+1h. (2) Discovery signs VC with operator key. (3) Verify VC returned with valid JWT structure (three dot-separated parts). (4) Push VC to consumer sentinel store: POST sentinel-consumer `/api/v1/credentials/store`. (5) GET sentinel-consumer `/api/v1/credentials` → confirm VC present with correct aud, scopes. (6) Parse VC JWT and verify: signature valid, iss matches Discovery DID in chain, sub=consumer DID, aud=producer DID. (7) Verify status bit = 0 (not revoked) via Bitstring Status List endpoint."
+      },
+      {
+        "step": 5,
+        "title": "Scenario (c): Authorized request (PERMIT) E2E",
+        "detail": "File: `tests/e2e/test_request_permit.py`. Test: (1) Consumer sentinel receives test trigger: POST sentinel-consumer `/test/trigger` with `{target_service: 'test-producer', path: '/data', method: 'GET'}`. (2) Measure latency from trigger to mock-backend hit. (3) Verify mock-backend received request with correct forwarded path and WITHOUT SentinelProof/SentinelVP headers (they must be scrubbed). (4) Verify response returned to consumer trigger. (5) Check structured logs: decision=PERMIT, consumer_did_hash, jti_hash, latency_ms. (6) Verify Prometheus counter `sentinel_inbound_requests_total{outcome='permit'}` incremented on producer. Assert latency p95 < 200ms for 10 consecutive requests."
+      },
+      {
+        "step": 6,
+        "title": "Scenario (d): Revocation with Δ enforcement",
+        "detail": "File: `tests/e2e/test_revocation.py`. Test: (1) Confirm consumer can make authorized request (PERMIT). (2) Revoke VC via Discovery `/api/v1/credentials/{id}/revoke`. Discovery updates Bitstring Status List on-chain. (3) Immediately after revocation: make another request — EXPECT still PERMIT (cache not yet expired). Record time T_revoke. (4) Sleep until Δ (status_list.max_age) elapses (configurable — use Δ=5s in test config). (5) After Δ: make another request — EXPECT DENY with `CREDENTIAL_REVOKED`. (6) Verify: `time_to_deny = T_deny - T_revoke ≤ Δ + 5s` (5s tolerance). (7) Check logs: deny decision=CREDENTIAL_REVOKED. Assert time_to_deny metric collected and within bounds."
+      },
+      {
+        "step": 7,
+        "title": "Scenario (e): Replay rejection",
+        "detail": "File: `tests/e2e/test_replay.py`. Test approach using intercepting proxy or custom test client that can replay exact JWS bytes: (1) Set up a test producer that logs raw `SentinelProof` and `SentinelVP` headers. (2) Make first valid request → PERMIT. (3) Extract jti from logged headers. (4) Replay exactly the same headers in a new HTTP request (same Proof JWS). (5) EXPECT 403 with `{error: 'PROOF_ALREADY_SEEN'}`. (6) Try with same jti but different iat (manually crafted JWT) — EXPECT 403 `PROOF_ALREADY_SEEN` (jti is unique across all proofs regardless of other fields). (7) Verify replay_rejects_total Prometheus counter incremented. Lower PROOF_TTL to 60s in test env to avoid waiting long for TTL tests."
+      },
+      {
+        "step": 8,
+        "title": "Outage simulation tests",
+        "detail": "File: `tests/e2e/test_outage.py`. Test A — RPC Node Outage: (1) Confirm normal PERMIT flow. (2) `docker compose stop hardhat-node`. (3) Make requests continuously. EXPECT: for duration < Δ, requests still PERMIT (using cached status list). (4) Sleep until Δ elapses. (5) After Δ: EXPECT DENY with `STATUS_LIST_UNAVAILABLE` (fail-closed per TASK-046 policy). (6) Restart hardhat-node → `docker compose start hardhat-node`. (7) Sleep Δ/2 for cache refresh. (8) EXPECT PERMIT restored. Test B — Discovery Outage: (1) `docker compose stop discovery`. (2) Make requests → EXPECT producer continues to DENY unauthorized (trust cache still has known-good info). (3) Restart discovery. Measure time to recover PERMIT after restart."
+      },
+      {
+        "step": 9,
+        "title": "Compromise simulation and reporting",
+        "detail": "File: `tests/e2e/test_compromise.py`. Issuer Compromise Test: (1) Confirm PERMIT flow. (2) Call `IssuerRegistry.disableIssuer(issuerDID)` on Hardhat node directly via web3.py. (3) Make request — monitor until DENY (no need to wait Δ — chain event triggers immediate cache invalidation for issuer trust, distinct from status list Δ). (4) Record `time_to_containment = T_deny - T_disable`. Assert time_to_containment < 30s. File: `tests/e2e/reporter.py`. Collect metrics from all test runs: latency (p50/p95/p99 per scenario), success_rate (% requests with expected outcome), time_to_containment (revocation and compromise scenarios). Output: `test-report.json` + human-readable `test-report.md`. Upload both as CI artifacts. Assert in CI: p95 latency < 300ms, time_to_containment < 30s."
+      }
+    ]
+  },
+  "project_structure": {
+    "files": {
+      "tests/e2e/docker-compose.e2e.yml": "Full test stack orchestration",
+      "tests/e2e/conftest.py": "Pytest fixtures (stack lifecycle, clients, deploys)",
+      "tests/e2e/test_onboarding.py": "Onboarding E2E scenario",
+      "tests/e2e/test_vc_issuance.py": "VC issuance scenario",
+      "tests/e2e/test_request_permit.py": "Authorized request (PERMIT) E2E",
+      "tests/e2e/test_revocation.py": "Revocation + Δ enforcement scenario",
+      "tests/e2e/test_replay.py": "Replay attack rejection scenario",
+      "tests/e2e/test_outage.py": "RPC and Discovery outage simulations",
+      "tests/e2e/test_compromise.py": "Issuer compromise containment test",
+      "tests/e2e/reporter.py": "Metrics collection and report generation"
+    }
+  },
+  "domain_entities": [
+    {
+      "name": "TestReport",
+      "fields": "run_id, timestamp, scenario, outcome (pass/fail), latency_p50_ms, latency_p95_ms, latency_p99_ms, success_rate_pct, time_to_containment_s, errors[]"
+    }
+  ],
+  "error_handling": [
+    {"scenario": "Stack startup timeout", "action": "Print all container logs, fail with descriptive message"},
+    {"scenario": "Mock backend unreachable", "action": "Wait-for-ready with timeout 60s, fail if not ready"},
+    {"scenario": "Δ too long for CI", "action": "Override DELTA_SECONDS=5 in e2e test env to reduce wait times"}
+  ],
+  "security_constraints": [
+    "E2E test credentials (admin passwords, JWT signing keys) generated fresh per test run — never hardcoded",
+    "Hardhat node uses deterministic test accounts — not real private keys",
+    "docker-compose.e2e.yml must not be usable in prod (missing prod-specific security configs) — add comment header warning",
+    "Test reports must not contain raw JWT tokens or DID private keys — only hashes/truncated IDs"
+  ],
+  "dependencies": ["TASK-010", "TASK-045", "TASK-046", "TASK-031", "TASK-050"],
+  "acceptance_criteria": [
+    "All 5 functional scenarios (a–e) pass in CI environment",
+    "p95 request latency < 300ms for PERMIT flow (10 consecutive requests)",
+    "Revocation time-to-deny ≤ Δ + 5 seconds (tolerance for cache refresh jitter)",
+    "Replay rejection: second request with same jti fails 100% of the time",
+    "RPC outage: fail-closed triggers within Δ of node going down",
+    "Issuer compromise containment: time_to_containment < 30 seconds",
+    "Test report generated with all metrics and uploaded as CI artifact"
+  ]
+}

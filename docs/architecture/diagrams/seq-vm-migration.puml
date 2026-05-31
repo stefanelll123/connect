@@ -1,0 +1,67 @@
+@startuml seq-vm-migration
+title VM Migration of a Sentinel (Live Migration)
+
+participant "Orchestrator\n(k8s / ops)" as ops
+participant "Old Sentinel\nInstance" as old_inst
+participant "New Sentinel\nInstance" as new_inst
+participant "Vault" as vault
+participant "Discovery API" as disc
+participant "Redis" as redis
+
+note over ops
+  VM migration scenario: 
+  The Sentinel process must move to a new host/pod
+  without changing its DID (key stays the same = same identity).
+  The private key is in Vault, so the new instance just needs
+  Vault AppRole credentials to bootstrap.
+end note
+
+== Step 1: Pre-migration — new instance starts ==
+
+ops -> new_inst: Start new Sentinel pod\n(new IP, same service config)
+
+new_inst -> vault: Authenticate (AppRole)\n{ role_id, secret_id }
+vault --> new_inst: Vault token (lease TTL = 1h)
+
+new_inst -> vault: Read private key\nsecret/sentinel/prod/consumer-app/private_key
+vault --> new_inst: private_key_bytes
+new_inst -> new_inst: Derive DID from key → same DID as old instance
+
+new_inst -> disc: GET /api/v1/config\nAuthorization: Bearer <vault-token>\nX-Sentinel-DID: did:key:z6Mk<DID>
+disc --> new_inst: signed config bundle
+new_inst -> new_inst: Verify config bundle signature\nApply config
+
+new_inst -> disc: GET /status/list-001 (warm up cache)
+new_inst -> redis: Populate JTI cache connection
+
+== Step 2: Traffic cutover ==
+
+ops -> ops: Update load balancer / service mesh:\n  Remove old_inst from upstream pool\n  Add new_inst to upstream pool
+
+note over old_inst, new_inst
+  During cutover there may be in-flight requests.
+  Both old and new instances accept requests.
+  JTI replay cache is shared via Redis — 
+  no duplicate JTI acceptance across instances.
+end note
+
+== Step 3: Old instance shutdown ==
+
+ops -> old_inst: SIGTERM (graceful shutdown)
+old_inst -> old_inst: Drain in-flight requests (grace period: 30s)
+old_inst -> vault: Revoke Vault token (best-effort)
+old_inst -> old_inst: Exit
+
+== Post-migration verification ==
+
+ops -> disc: GET /api/v1/sentinels/did:key:z6Mk<DID>
+disc --> ops: 200 OK { status: ACTIVE, last_seen: <timestamp> }
+
+note over new_inst
+  The Sentinel DID is unchanged.
+  All VCs issued to the old instance remain valid.
+  No re-enrollment required.
+  No key rotation required (key stayed in Vault).
+end note
+
+@enduml

@@ -1,0 +1,147 @@
+{
+  "id": "TASK-001",
+  "title": "Reference Architecture Definition and Architecture Decision Records (ADRs) for the Gateway Platform with DID/VC and Blockchain",
+  "component": "security",
+  "status": "not-started",
+  "description": "Produce an end-to-end, implementation-ready architecture document and a numbered set of Architecture Decision Records (ADRs) covering all critical components (Discovery Service, Sentinels, Blockchain Trust Layer), data flows, trust boundaries, and irreversible decisions (DID/VC/VP model, revocation, onboarding, multi-instance, migration). This document becomes the binding implementation contract for all engineering teams.",
+  "objectives": [
+    "Produce an implementable architecture (C4 + sequence diagrams) for all critical flows",
+    "Lock key decisions and rejected alternatives (ADRs) so implementation is deterministic",
+    "Clearly establish the separation: Discovery as orchestration/config, Sentinels as enforcement, Blockchain as trust anchor"
+  ],
+  "implementation_guidance": {
+    "overview": "Write a formal Architecture Reference Document and a set of numbered ADRs that cover all architectural decisions, component responsibilities, data flows, and security invariants. This document must be sufficiently detailed that engineering teams can implement without additional design decisions.",
+    "steps": [
+      "Step 1 - Create the Architecture Reference Document: Write a document structured into sections: (1) System Overview, (2) Component Catalogue (Discovery, Sentinel-Producer, Sentinel-Consumer, Blockchain Trust Layer, Secret Storage), (3) Responsibilities Matrix mapping each component to its functions, (4) API Contract Summary (references to detailed specs), (5) Data Flow Catalogue, (6) Network Topology, (7) Trust Boundaries, (8) Security Invariants.",
+      "Step 2 - Produce C4 diagrams: Level 1 (System Context): show Government Entity A, Government Entity B, Central Discovery, Blockchain, and external actors. Level 2 (Container): expand each entity to show Consumer Service, Consumer Sentinel, Discovery Service, Producer Sentinel, Producer Service, and the Trust Layer contracts. Level 3 (Component): for each service, show internal modules (e.g., Producer Sentinel: VP Verifier, Policy Engine, Revocation Manager, Proxy).",
+      "Step 3 - Produce sequence diagrams using PlantUML or Mermaid for: (a) Application/service registration, (b) Sentinel onboarding, (c) VC issuance, (d) Consumer-to-Producer request execution, (e) Credential revocation, (f) Key/credential rotation, (g) VM migration of a Sentinel, (h) Multi-instance Sentinel join.",
+      "Step 4 - Define message fields for each sequence diagram: for every arrow in the sequence diagram, specify the exact JSON payload (field names, types, required/optional). This ensures engineers do not make ad-hoc decisions.",
+      "Step 5 - Write numbered ADRs. Each ADR must contain: ID, Title, Status, Context, Decision, Consequences (positive/negative), Rejected Alternatives. Required ADRs: ADR-001 DID Method selection, ADR-002 VC encoding format (JWT-VC vs JSON-LD), ADR-003 Revocation mechanism (Bitstring Status List), ADR-004 Request anti-replay strategy (DPoP-inspired), ADR-005 Blockchain network selection, ADR-006 Secret storage architecture, ADR-007 Environment isolation model (separate DIDs per env), ADR-008 Transport baseline (HTTP with DIDComm as optional adapter).",
+      "Step 6 - Define Security Invariants as a numbered list. Each invariant must be testable. Examples: SI-001: A request MUST be rejected if the credential status is stale beyond Δ; SI-002: An enrollment token is one-time use and cannot be replayed; SI-003: A VP proof MUST be bound to the exact audience DID and environment; SI-004: Discovery makes no final authorization decisions; SI-005: A disabled issuer's VCs MUST be rejected immediately.",
+      "Step 7 - Classify all data in the document as: PUBLIC (can be in logs), INTERNAL (team-confidential), SECRET (must be redacted). Ensure no secret material appears in document body."
+    ],
+    "project_structure": {
+      "description": "Files to create as outputs of this task",
+      "directories": [
+        "docs/architecture/"
+      ],
+      "files": [
+        "docs/architecture/README.md — index of all architecture documents",
+        "docs/architecture/reference-architecture.md — the main architecture document",
+        "docs/architecture/diagrams/c4-context.puml — C4 L1 system context diagram",
+        "docs/architecture/diagrams/c4-container.puml — C4 L2 container diagram",
+        "docs/architecture/diagrams/c4-component-discovery.puml",
+        "docs/architecture/diagrams/c4-component-sentinel.puml",
+        "docs/architecture/diagrams/seq-service-registration.puml",
+        "docs/architecture/diagrams/seq-sentinel-onboarding.puml",
+        "docs/architecture/diagrams/seq-vc-issuance.puml",
+        "docs/architecture/diagrams/seq-request-execution.puml",
+        "docs/architecture/diagrams/seq-revocation.puml",
+        "docs/architecture/diagrams/seq-key-rotation.puml",
+        "docs/architecture/diagrams/seq-vm-migration.puml",
+        "docs/architecture/diagrams/seq-multi-instance.puml",
+        "docs/architecture/adrs/ADR-001-did-method.md",
+        "docs/architecture/adrs/ADR-002-vc-encoding.md",
+        "docs/architecture/adrs/ADR-003-revocation-mechanism.md",
+        "docs/architecture/adrs/ADR-004-anti-replay.md",
+        "docs/architecture/adrs/ADR-005-blockchain-network.md",
+        "docs/architecture/adrs/ADR-006-secret-storage.md",
+        "docs/architecture/adrs/ADR-007-environment-isolation.md",
+        "docs/architecture/adrs/ADR-008-transport-baseline.md",
+        "docs/architecture/security-invariants.md"
+      ]
+    },
+    "domain_entities": {
+      "description": "Key entities that the architecture document must define precisely",
+      "entities": [
+        {
+          "name": "GovernmentEntity",
+          "description": "An independent government organization operating its own Sentinel(s)",
+          "fields": [
+            "entity_id: string — unique identifier (e.g., RO-MFP, RO-MAI)",
+            "name: string — human-readable name",
+            "environments: array<string> — allowed envs (dev/test/prod)",
+            "sentinel_dids: array<string> — DIDs of registered Sentinels"
+          ]
+        },
+        {
+          "name": "Sentinel",
+          "description": "The DID-enabled gateway component",
+          "fields": [
+            "did: string — the Sentinel's W3C DID (e.g., did:key:z6Mk...)",
+            "role: enum — PRODUCER or CONSUMER",
+            "service_id: string — the service it represents",
+            "env: enum — dev | test | prod",
+            "instance_id: string(UUID) — ephemeral per-process identifier",
+            "public_key: JWK — the public key material for the DID"
+          ]
+        },
+        {
+          "name": "TrustBoundary",
+          "description": "A demarcation of what is trusted and what is not",
+          "fields": [
+            "component: string",
+            "trusts: array<string> — which components it trusts",
+            "does_not_trust: array<string> — explicitly untrusted components",
+            "enforcement_point: string — which component enforces this boundary"
+          ]
+        }
+      ]
+    },
+    "interface_contracts": {
+      "discovery_to_sentinel": {
+        "description": "Discovery provides configuration and credentials to Sentinels",
+        "mechanism": "Pull-based over mTLS HTTPS",
+        "endpoints_referenced": "Defined in TASK-026, TASK-027, TASK-029"
+      },
+      "consumer_sentinel_to_producer_sentinel": {
+        "description": "Consumer attaches a signed proof (ProofClaims JWS) and VP to each request",
+        "mechanism": "HTTP headers: Authorization: SentinelProof <jws> and SentinelVP: <jwt-vp>",
+        "spec_referenced": "Defined in TASK-006"
+      },
+      "sentinel_to_blockchain": {
+        "description": "Read-only queries for trust state; Discovery writes anchors",
+        "mechanism": "web3.py async via RPC",
+        "contracts_referenced": "IssuerRegistry, TrustPolicyRegistry, StatusRegistry, ServiceRegistry — defined in TASK-014 through TASK-017"
+      }
+    },
+    "data_structures": {
+      "security_invariant_format": {
+        "description": "Standard format for each security invariant",
+        "example": {
+          "id": "SI-001",
+          "statement": "A request MUST be rejected if the credential status is stale beyond Δ",
+          "enforcement_point": "Producer Sentinel — RevocationManager",
+          "test_reference": "test_staleness_enforcement in TASK-065",
+          "policy_behavior": "fail-closed by default"
+        }
+      },
+      "adr_format": {
+        "description": "Standard ADR format to use in all ADR files",
+        "sections": ["ID", "Title", "Status (Proposed|Accepted|Deprecated|Superseded)", "Date", "Context", "Decision", "Consequences.Positive", "Consequences.Negative", "Rejected Alternatives"]
+      }
+    },
+    "security_constraints": [
+      "Discovery must never be described as an authorization authority — explicitly document that final enforcement is at Producer Sentinel",
+      "All trust decisions must reference a verifiable on-chain anchor or a signed artifact",
+      "The document must clearly state that transporting a request through Discovery does NOT imply authorization",
+      "Sensitive data classifications must be applied to every data element in sequence diagrams"
+    ]
+  },
+  "technical_requirements": [
+    "C4 model for documentation structure (https://c4model.com/)",
+    "PlantUML or Mermaid for sequence and C4 diagrams",
+    "W3C DID Core v1.0 for terminology and concepts",
+    "W3C Verifiable Credentials Data Model v2.0 for VC/VP concepts",
+    "ADR template (e.g., MADR or Michael Nygard format)"
+  ],
+  "dependencies": [],
+  "acceptance_criteria": [
+    "An approved Architecture Reference Document exists with all required sections",
+    "At least 8 numbered ADRs exist, each with context, decision, and rejected alternatives",
+    "All critical flows have sequence diagrams with message fields specified",
+    "Security invariants are listed, numbered, and referenced in subsequent implementation tasks",
+    "All document data is classified as PUBLIC / INTERNAL / SECRET",
+    "Engineering teams can begin implementing without making new architectural decisions"
+  ]
+}

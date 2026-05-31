@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}Bootstrap — Governance Admin{% endblock %}
+{% block content %}
+
+<h4 class="fw-bold mb-3">Bootstrap — Grant Roles</h4>
+
+{% if success %}
+<div class="alert alert-success alert-dismissible fade show">
+  <i class="bi bi-check-circle-fill me-2"></i>{{ success }}
+  <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+</div>
+{% endif %}
+{% if error %}
+<div class="alert alert-danger alert-dismissible fade show">
+  <i class="bi bi-exclamation-triangle-fill me-2"></i>{{ error }}
+  <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+</div>
+{% endif %}
+
+<div class="row g-4">
+
+  <!-- Current role status -->
+  <div class="col-lg-4">
+    <div class="card p-4">
+      <h6 class="fw-bold mb-3">Current Role Status</h6>
+      <p class="text-muted small">Governance address:</p>
+      <div class="mono small mb-3 copyable" data-copy="{{ gov_key.address }}" title="Click to copy">{{ gov_key.address }}</div>
+      {% for role, has in roles.items() %}
+      <div class="d-flex align-items-center mb-2">
+        {% if has %}
+          <i class="bi bi-check-circle-fill text-success me-2"></i>
+          <span class="text-success">{{ role }}</span>
+        {% else %}
+          <i class="bi bi-x-circle-fill text-danger me-2"></i>
+          <span class="text-danger">{{ role }}</span>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+
+  <!-- Bootstrap form -->
+  <div class="col-lg-8">
+    <div class="card p-4">
+      <div class="alert alert-warning">
+        <i class="bi bi-exclamation-triangle-fill me-2"></i>
+        <strong>One-time setup.</strong> Enter the deployer private key (the key used to deploy
+        the contracts — <code>HARDHAT_PRIVATE_KEY</code> in local dev). This grants the three
+        governance roles to:<br>
+        <code class="mono">{{ gov_key.address }}</code><br><br>
+        The deployer key is used only for this transaction and is <strong>never stored</strong>
+        in the database.
+      </div>
+
+      <form method="post" action="/bootstrap">
+        <div class="mb-4">
+          <label class="form-label fw-semibold">Deployer Private Key</label>
+          <input
+            type="password"
+            name="deployer_key"
+            class="form-control font-monospace"
+            placeholder="0xac0974bec39a17e36ba4a6b4d238ff944bacb478..."
+            autocomplete="off"
+            required
+          >
+          <div class="form-text">
+            For local dev this is the same as <code>CHAIN_ANCHOR_PRIVATE_KEY</code> (Anvil account 0).
+          </div>
+        </div>
+        <button type="submit" class="btn btn-warning w-100">
+          <i class="bi bi-key-fill me-2"></i>Grant All Roles
+        </button>
+      </form>
+    </div>
+  </div>
+
+</div>
+{% endblock %}

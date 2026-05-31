@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "sentinel-node.fullname" . }}
+  labels:
+    {{- include "sentinel-node.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.targetPort }}
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "sentinel-node.selectorLabels" . | nindent 4 }}
+---
+# Headless service for StatefulSet stable DNS
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "sentinel-node.fullname" . }}-headless
+  labels:
+    {{- include "sentinel-node.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  ports:
+    - port: {{ .Values.service.targetPort }}
+      targetPort: {{ .Values.service.targetPort }}
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "sentinel-node.selectorLabels" . | nindent 4 }}

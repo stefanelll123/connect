@@ -1,0 +1,20 @@
+{{- if .Values.tls.enabled }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "sentinel-discovery.fullname" . }}-tls
+  labels:
+    {{- include "sentinel-discovery.labels" . | nindent 4 }}
+spec:
+  secretName: {{ .Values.tls.secretName }}
+  duration: 2160h  # 90 days
+  renewBefore: 360h  # 15 days before expiry
+  dnsNames:
+    - {{ include "sentinel-discovery.fullname" . }}
+    - {{ include "sentinel-discovery.fullname" . }}.{{ .Release.Namespace }}
+    - {{ include "sentinel-discovery.fullname" . }}.{{ .Release.Namespace }}.svc
+    - {{ include "sentinel-discovery.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local
+  issuerRef:
+    kind: {{ .Values.tls.issuerRef.kind }}
+    name: {{ .Values.tls.issuerRef.name }}
+{{- end }}

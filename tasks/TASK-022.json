@@ -1,0 +1,105 @@
+{
+  "id": "TASK-022",
+  "title": "Discovery Service: Database Schema and Alembic Migrations (PostgreSQL + SQLAlchemy 2.0 async)",
+  "component": "discovery-service",
+  "status": "not-started",
+  "description": "Define all database tables for the Discovery Service using SQLAlchemy 2.0 declarative async ORM models. Create the complete schema covering: applications, services, sentinel identities, sentinel instances, enrollment tokens (one-time), VC credential metadata, status lists, revocation events, config bundles, audit events (append-only), chain cache tables, and policy snapshots. Set up Alembic for versioned migrations.",
+  "objectives": [
+    "Robust and auditable persistence for the complete sentinel/VC lifecycle",
+    "Idempotent and concurrent-safe one-time token consumption",
+    "Append-only audit_events table — no DELETE or UPDATE permitted at application layer"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      "Step 1 - Base Setup: Use SQLAlchemy 2.0 async with asyncpg driver. Create services/discovery/src/discovery/db/base.py with DeclarativeBase class. Create db/session.py with async_engine (create_async_engine, pool_size=10, max_overflow=20) and AsyncSessionFactory. All models inherit from Base.",
+      "Step 2 - apps Table: id (UUID PK), name (TEXT UNIQUE NOT NULL), owner (TEXT), created_at (TIMESTAMPTZ default now()), updated_at (TIMESTAMPTZ), is_active (BOOL default true). Represents top-level application entities.",
+      "Step 3 - services Table: id (UUID PK), app_id (UUID FK → apps.id), service_id (TEXT NOT NULL), env (TEXT NOT NULL CHECK env IN ('dev','test','prod')), display_name (TEXT), description (TEXT), owner_did (TEXT), is_active (BOOL default true), created_at (TIMESTAMPTZ), updated_at (TIMESTAMPTZ). UNIQUE(service_id, env). Index on (service_id, env, is_active).",
+      "Step 4 - sentinels Table: id (UUID PK), service_id (UUID FK → services.id), did (TEXT NOT NULL), role (TEXT NOT NULL CHECK role IN ('producer','consumer')), env (TEXT NOT NULL), is_active (BOOL default true), created_at (TIMESTAMPTZ), last_seen (TIMESTAMPTZ), config_version (INT default 0). UNIQUE(did, role, env).",
+      "Step 5 - sentinel_instances Table: id (UUID PK), sentinel_id (UUID FK → sentinels.id), instance_id (TEXT NOT NULL UNIQUE), base_url (TEXT), status (TEXT CHECK status IN ('active','draining','offline')), last_seen (TIMESTAMPTZ), metadata (JSONB). Index on (sentinel_id, status).",
+      "Step 6 - enrollment_tokens Table: id (UUID PK), jti (TEXT NOT NULL UNIQUE), service_id (TEXT NOT NULL), role (TEXT NOT NULL), env (TEXT NOT NULL), status (TEXT NOT NULL CHECK status IN ('PENDING','APPROVED','CONSUMED','EXPIRED')), created_by (TEXT), approved_by (TEXT), token_hash (TEXT NOT NULL COMMENT 'SHA-256 of the JWT — raw token never stored'), created_at (TIMESTAMPTZ), approved_at (TIMESTAMPTZ), expires_at (TIMESTAMPTZ NOT NULL), consumed_at (TIMESTAMPTZ). Index on (jti), Index on (status, expires_at).",
+      "Step 7 - credentials Table: id (UUID PK), credential_type (TEXT NOT NULL), issuer_did (TEXT NOT NULL), subject_did (TEXT NOT NULL), audience (TEXT), env (TEXT), jti (TEXT UNIQUE), issued_at (TIMESTAMPTZ), expires_at (TIMESTAMPTZ), status (TEXT NOT NULL CHECK status IN ('active','revoked','expired','deprecated')), status_list_id (TEXT), status_list_index (INT), is_latest (BOOL default true). Index on (subject_did, env, is_latest). NEVER store VC JWT plaintext — store only metadata.",
+      "Step 8 - status_lists Table: id (UUID PK), status_list_id (TEXT NOT NULL UNIQUE), issuer_did (TEXT NOT NULL), env (TEXT NOT NULL), credential_type (TEXT), current_hash (TEXT NOT NULL), bitstring_url (TEXT), published_at (TIMESTAMPTZ), version (INT default 1), anchor_tx_hash (TEXT), anchor_block (BIGINT), anchor_pending (BOOL default true). Index on (status_list_id, env).",
+      "Step 9 - audit_events Table: id (UUID PK), event_id (TEXT UNIQUE), ts (TIMESTAMPTZ NOT NULL default now()), actor_type (TEXT NOT NULL), actor_id (TEXT), action (TEXT NOT NULL), target_type (TEXT), target_id (TEXT), summary (TEXT), request_id (TEXT), ip_address (TEXT), prev_hash (TEXT), event_hash (TEXT NOT NULL). APPEND-ONLY: no UPDATE or DELETE via ORM. Partition by month in PostgreSQL for performance. Index on (ts, actor_id, action).",
+      "Step 10 - config_bundles Table: id (UUID PK), sentinel_id (UUID FK → sentinels.id), version (INT NOT NULL), bundle_hash (TEXT), signed_bundle_jws (TEXT NOT NULL), issued_at (TIMESTAMPTZ), is_current (BOOL default true). Index on (sentinel_id, is_current).",
+      "Step 11 - Alembic Setup: alembic init in services/discovery/. alembic.ini: sqlalchemy.url = ${DATABASE_URL}. env.py: target_metadata = Base.metadata, run_async_migrations = True. Create initial migration: alembic revision --autogenerate -m 'initial_schema'. Seed migration for dev: inserts admin user, test app/service records.",
+      "Step 12 - Repository Layer: For each table, create a repository class in services/discovery/src/discovery/repositories/. Example: EnrollmentTokenRepository.consume_atomic(session, jti) → uses SELECT ... FOR UPDATE SKIP LOCKED to atomically commit a token. Returns the token record or raises TokenAlreadyConsumedError."
+    ],
+    "project_structure": {
+      "files": {
+        "services/discovery/src/discovery/db/": {
+          "base.py": "DeclarativeBase",
+          "session.py": "Engine + AsyncSessionFactory",
+          "models/": {
+            "__init__.py": "",
+            "apps.py": "",
+            "services.py": "",
+            "sentinels.py": "",
+            "enrollment_tokens.py": "",
+            "credentials.py": "",
+            "status_lists.py": "",
+            "audit_events.py": "",
+            "config_bundles.py": ""
+          }
+        },
+        "services/discovery/alembic/": {
+          "env.py": "",
+          "versions/": "Migration scripts"
+        },
+        "services/discovery/src/discovery/repositories/": {
+          "enrollment_tokens.py": "consume_atomic()",
+          "sentinels.py": "",
+          "credentials.py": "",
+          "audit.py": "append_event() only"
+        }
+      }
+    },
+    "database_schema": {
+      "critical_constraints": [
+        "UNIQUE(service_id, env) on services table prevents duplicate service registrations",
+        "UNIQUE(did, role, env) on sentinels prevents identity collision",
+        "UNIQUE(jti) on enrollment_tokens provides replay protection",
+        "enrollment_tokens.consumed_at is set atomically via SELECT FOR UPDATE — only one concurrent consumer wins",
+        "audit_events has no application-level DELETE/UPDATE — enforced via ORM-layer restriction"
+      ],
+      "indexes": [
+        "CREATE INDEX idx_services_service_env ON services(service_id, env, is_active)",
+        "CREATE INDEX idx_sentinels_did ON sentinels(did)",
+        "CREATE INDEX idx_enrollment_jti ON enrollment_tokens(jti)",
+        "CREATE INDEX idx_enrollment_status_exp ON enrollment_tokens(status, expires_at)",
+        "CREATE INDEX idx_audit_ts ON audit_events(ts DESC)",
+        "CREATE INDEX idx_audit_actor ON audit_events(actor_id, action, ts DESC)"
+      ]
+    },
+    "error_handling": {
+      "repository_exceptions": [
+        "TokenNotFoundError: enrollment token JTI does not exist",
+        "TokenAlreadyConsumedError: token consumed_at is already set",
+        "TokenExpiredError: expires_at < now()",
+        "DuplicateServiceError: UNIQUE(service_id, env) violation"
+      ]
+    },
+    "security_constraints": [
+      "VC JWT payload MUST NOT be stored in the database — only metadata (jti, type, issuer, subject, exp, status)",
+      "enrollment_tokens MUST store only SHA-256(token_jwt) — never the raw JWT",
+      "audit_events MUST have no UPDATE or DELETE route in any repository or router",
+      "DB connection string MUST use SecretStr — never logged",
+      "asyncpg connection pool recycled after 3600s to prevent stale connections"
+    ]
+  },
+  "technical_requirements": [
+    "SQLAlchemy >= 2.0.29 (async)",
+    "asyncpg >= 0.29.0",
+    "Alembic >= 1.13.0",
+    "PostgreSQL 15+"
+  ],
+  "dependencies": [
+    "TASK-021"
+  ],
+  "acceptance_criteria": [
+    "alembic upgrade head creates all tables on a blank PostgreSQL database",
+    "UNIQUE constraints are enforced (duplicate service_id+env raises IntegrityError)",
+    "consume_atomic() is safe under concurrent test (two requests for same token: one succeeds, one raises TokenAlreadyConsumedError)",
+    "No application code path can UPDATE or DELETE from audit_events",
+    "alembic downgrade base succeeds without errors"
+  ]
+}

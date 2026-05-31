@@ -1,0 +1,73 @@
+{
+  "id": "TASK-055",
+  "title": "Sentinel UI: Live Request Log Streaming via SSE with Backpressure and Filters",
+  "component": "sentinel/ui/live_logs",
+  "status": "pending",
+  "description": "Implement a Server-Sent Events (SSE) endpoint that streams live pre-redacted request log events from the in-memory LogRingBuffer (TASK-051) to the UI. Support filtering by decision (permit/deny) and service_id. Implement backpressure handling: slow or disconnected clients must not block the logger or cause memory growth. Cap concurrent SSE connections. Test under load with multiple connections and rapid event ingestion.",
+  "objectives": [
+    "Implement GET /ui/logs/stream SSE endpoint",
+    "Get events from LogRingBuffer subscriber queue (TASK-051)",
+    "Support query filters: ?filter_decision=permit|deny and ?filter_service_id=<value>",
+    "Backpressure: if client is slow, drop events (not block) and send a 'events_dropped' SSE comment",
+    "Max 10 concurrent SSE connections — return 429 beyond limit",
+    "Clean up subscriber queue on client disconnect (avoid memory leak)"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      {
+        "step": 1,
+        "title": "Implement SSE streaming generator",
+        "detail": "Function `async def log_event_stream(subscriber_queue: asyncio.Queue, filter_decision: str | None, filter_service_id: str | None) -> AsyncGenerator[str, None]`. In an infinite loop: (1) `event = await asyncio.wait_for(subscriber_queue.get(), timeout=15.0)` — timeout sends a keep-alive comment `: keepalive\\n\\n`. (2) Apply filters: skip event if `filter_decision` set and `event.decision != filter_decision`. (3) Skip if `filter_service_id` set and `event.service_id != filter_service_id`. (4) Serialize event to JSON (pre-redacted by SentinelLogger — no additional processing needed). (5) Yield `f'data: {json_str}\\n\\n'` (SSE format). On `asyncio.CancelledError`: break loop and trigger cleanup."
+      },
+      {
+        "step": 2,
+        "title": "Implement backpressure handling",
+        "detail": "LogRingBuffer.subscribe() returns a `asyncio.Queue(maxsize=200)`. When the sentinel pushes an event to subscribers (in `LogRingBuffer.append()`): use `queue.put_nowait(event)`. If `queue.full()`: call `queue.get_nowait()` to drop the OLDEST event and put the new one (ring behavior for subscriber queue too). Increment `events_dropped` counter. When dropping occurs, send an SSE comment to the client: `': events_dropped=1\\n\\n'` so the UI can show a warning indicator. This ensures the main logger thread is NEVER blocked by a slow UI client."
+      },
+      {
+        "step": 3,
+        "title": "Implement connection limit enforcement",
+        "detail": "Add `active_sse_connections: int = 0` to app state (thread-safe via `asyncio.Lock`). In the SSE route handler: acquire lock, check `active_sse_connections < 10`, increment, release lock. If limit reached: return `Response(status_code=429, content='Too Many Streaming Connections')`. On client disconnect (detected via `asyncio.CancelledError` or generator exhaustion): acquire lock, decrement `active_sse_connections`, call `LogRingBuffer.unsubscribe(queue)` to remove the queue from the subscriber list. This prevents unbounded memory growth from accumulated dead subscriber queues."
+      },
+      {
+        "step": 4,
+        "title": "Implement SSE FastAPI route",
+        "detail": "Route: `GET /ui/logs/stream` in `sentinel/ui/router.py`. Parameters: `filter_decision: str | None = Query(None, regex='^(permit|deny)$')`, `filter_service_id: str | None = Query(None, max_length=64)`. Handler creates subscriber queue, registers with ring buffer, creates StreamingResponse: `StreamingResponse(log_event_stream(queue, filter_decision, filter_service_id), media_type='text/event-stream', headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})`. `X-Accel-Buffering: no` disables nginx proxy buffering for SSE. `Cache-Control: no-cache` prevents browser caching."
+      },
+      {
+        "step": 5,
+        "title": "UI integration for live log page",
+        "detail": "In `logs.html` template: add a 'Live Stream' button that opens `GET /ui/logs/stream` in an EventSource. Minimal JavaScript: `const evtSource = new EventSource('/ui/logs/stream?filter_decision=' + filter); evtSource.onmessage = e => { prependRowToTable(JSON.parse(e.data)); }`. Cap displayed rows at 500 (remove oldest from DOM on overflow). Show 'Events dropped' notice if SSE comment with `events_dropped` received. Add 'Stop Stream' button that calls `evtSource.close()`. Auto-reconnect: EventSource reconnects automatically if connection drops — this is the browser's built-in behavior."
+      },
+      {
+        "step": 6,
+        "title": "Tests",
+        "detail": "Test file: `tests/unit/ui/test_live_logs.py`. Cases: (1) SSE endpoint returns 200 text/event-stream content-type; (2) events pushed to ring buffer appear in stream within 100ms; (3) filter_decision=deny only streams deny events; (4) 11th concurrent connection returns 429; (5) slow client: push 300 events rapidly, verify queue doesn't exceed maxsize=200 (events dropped); (6) client disconnect decrements active_sse_connections to 0; (7) keep-alive comment sent every 15s timeout. Use `httpx.AsyncClient` with `stream()` context for SSE response testing."
+      }
+    ]
+  },
+  "project_structure": {
+    "files": {
+      "sentinel/ui/live_logs.py": "SSE generator and stream handler",
+      "sentinel/ui/router.py": "Updated with GET /ui/logs/stream route",
+      "sentinel/ui/templates/logs.html": "Updated with EventSource client-side JS",
+      "tests/unit/ui/test_live_logs.py": "SSE endpoint tests"
+    }
+  },
+  "security_constraints": [
+    "SSE endpoint is UI-only (localhost-bound per TASK-054) — not accessible from external network",
+    "No auth required on SSE endpoint since it's localhost-only (same as other /ui/* routes)",
+    "filter_service_id is validated with max_length and no special chars to prevent injection via query param",
+    "Events are pre-redacted by SentinelLogger — SSE endpoint performs no additional redaction (avoids double-processing)",
+    "Connection limit of 10 prevents local DoS via SSE connection exhaustion"
+  ],
+  "dependencies": ["TASK-054", "TASK-051"],
+  "acceptance_criteria": [
+    "SSE stream delivers events in real-time (< 100ms from Logger.log_request to client receipt)",
+    "Events dropped when client queue is full — logger never blocked",
+    "Connection limit of 10 enforced (11th returns 429)",
+    "Client disconnect properly releases subscriber queue (no leak)",
+    "Filter by decision correctly applied server-side",
+    "All 7 test cases pass"
+  ]
+}

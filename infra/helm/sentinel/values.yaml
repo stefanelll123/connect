@@ -1,0 +1,69 @@
+replicaCount: 1
+
+image:
+  registry: ghcr.io
+  repository: your-org/sentinel
+  tag: "latest"
+  pullPolicy: Always
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+
+hpa:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 60
+
+# StatefulSet PVC per-replica
+persistence:
+  enabled: true
+  storageClass: "standard"
+  size: 1Gi
+  accessMode: ReadWriteOnce
+
+# Vault Agent Injector
+vault:
+  enabled: false
+  role: "sentinel"
+  secrets:
+    signingKey: "secret/data/sentinel/signing-key"
+
+# cert-manager mTLS
+tls:
+  enabled: false
+  issuerRef:
+    kind: ClusterIssuer
+    name: sentinel-internal-ca
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+env:
+  DEPLOYMENT_ENVIRONMENT: production
+  HOST: "0.0.0.0"
+  PORT: "8080"
+  SENTINEL_HOME: /sentinel-home
+  OTEL_ENABLED: "true"

@@ -1,0 +1,51 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "sentinel-discovery.fullname" . }}
+  labels:
+    {{- include "sentinel-discovery.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "sentinel-discovery.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow from Ingress Controller
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - port: 8000
+    # Allow from Sentinel pods
+    - from:
+        - podSelector:
+            matchLabels:
+              role: sentinel
+      ports:
+        - port: 8000
+  egress:
+    # Allow DNS
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # Allow to PostgreSQL
+    - ports:
+        - port: 5432
+    # Allow to Redis
+    - ports:
+        - port: 6379
+    # Allow to EVM RPC (Hardhat/geth default)
+    - ports:
+        - port: 8545
+    # Allow to Vault
+    - ports:
+        - port: 8200
+    # Allow to OTel Collector
+    - ports:
+        - port: 4317
+        - port: 4318

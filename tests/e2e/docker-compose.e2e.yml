@@ -1,0 +1,146 @@
+version: "3.9"
+
+# E2E test stack — isolated from production docker-compose.yaml.
+# Usage: docker compose -f tests/e2e/docker-compose.e2e.yml up -d
+#
+# All services use deterministic local ports so tests can connect directly.
+
+x-healthcheck-defaults: &hc_defaults
+  interval: 5s
+  timeout: 3s
+  retries: 20
+
+services:
+  # ── Infrastructure ─────────────────────────────────────────────────────────
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: sentinel
+      POSTGRES_PASSWORD: sentinel_e2e
+      POSTGRES_DB: sentinel_e2e
+    ports: ["15432:5432"]
+    healthcheck:
+      <<: *hc_defaults
+      test: ["CMD-SHELL", "pg_isready -U sentinel -d sentinel_e2e"]
+    tmpfs: ["/var/lib/postgresql/data"]  # ephemeral — reset between runs
+
+  redis:
+    image: redis:7-alpine
+    ports: ["16379:6379"]
+    healthcheck:
+      <<: *hc_defaults
+      test: ["CMD", "redis-cli", "ping"]
+
+  vault:
+    image: hashicorp/vault:1.15
+    cap_add: [IPC_LOCK]
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: e2e-root-token
+      VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+    ports: ["18200:8200"]
+    healthcheck:
+      <<: *hc_defaults
+      test: ["CMD", "vault", "status", "-address=http://127.0.0.1:8200"]
+
+  hardhat-node:
+    image: ghcr.io/foundry-rs/foundry:latest
+    entrypoint: ["anvil", "--host", "0.0.0.0", "--port", "8545", "--chain-id", "31337", "--block-time", "1"]
+    ports: ["18545:8545"]
+    healthcheck:
+      <<: *hc_defaults
+      test: ["CMD-SHELL", "curl -sf -X POST -H 'Content-Type: application/json' --data '{\"jsonrpc\":\"2.0\",\"method\":\"eth_blockNumber\",\"id\":1}' http://localhost:8545"]
+
+  mock-backend:
+    image: mockoon/cli:latest
+    command: ["--data", "/mock/config.json", "--port", "9000"]
+    volumes:
+      - ./mock-backend-config.json:/mock/config.json:ro
+    ports: ["19000:9000"]
+    healthcheck:
+      <<: *hc_defaults
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/health"]
+
+  # ── Application services ───────────────────────────────────────────────────
+
+  discovery:
+    image: ghcr.io/${GITHUB_REPOSITORY:-local/sentinel}/discovery:${IMAGE_TAG:-dev}
+    build:
+      context: ../..
+      dockerfile: infra/docker/discovery/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+asyncpg://sentinel:sentinel_e2e@postgres:5432/sentinel_e2e
+      REDIS_URL: redis://redis:6379/0
+      VAULT_ADDR: http://vault:8200
+      VAULT_TOKEN: e2e-root-token
+      CHAIN_RPC_URL: http://hardhat-node:8545
+      CHAIN_ID: "31337"
+      SENTINEL_ENV: e2e
+      LOG_LEVEL: DEBUG
+      CORS_ORIGINS: "*"
+    ports: ["18000:8000"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      vault:
+        condition: service_healthy
+      hardhat-node:
+        condition: service_healthy
+    healthcheck:
+      <<: *hc_defaults
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live')\""]
+
+  sentinel-producer:
+    image: ghcr.io/${GITHUB_REPOSITORY:-local/sentinel}/sentinel:${IMAGE_TAG:-dev}
+    build:
+      context: ../..
+      dockerfile: infra/docker/sentinel/Dockerfile
+    environment:
+      SENTINEL_ROLE: producer
+      SENTINEL_HOME: /sentinel-home
+      DISCOVERY_URL: http://discovery:8000
+      REDIS_URL: redis://redis:6379/0
+      CHAIN_RPC_URL: http://hardhat-node:8545
+      CHAIN_ID: "31337"
+      BACKEND_URL: http://mock-backend:9000
+      SENTINEL_ENV: e2e
+      LOG_LEVEL: DEBUG
+    ports: ["18080:8080"]
+    volumes:
+      - sentinel-home-producer:/sentinel-home
+    depends_on:
+      discovery:
+        condition: service_healthy
+    healthcheck:
+      <<: *hc_defaults
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health"]
+
+  sentinel-consumer:
+    image: ghcr.io/${GITHUB_REPOSITORY:-local/sentinel}/sentinel:${IMAGE_TAG:-dev}
+    build:
+      context: ../..
+      dockerfile: infra/docker/sentinel/Dockerfile
+    environment:
+      SENTINEL_ROLE: consumer
+      SENTINEL_HOME: /sentinel-home
+      DISCOVERY_URL: http://discovery:8000
+      REDIS_URL: redis://redis:6379/0
+      CHAIN_RPC_URL: http://hardhat-node:8545
+      CHAIN_ID: "31337"
+      SENTINEL_ENV: e2e
+      LOG_LEVEL: DEBUG
+    ports: ["18081:8080"]
+    volumes:
+      - sentinel-home-consumer:/sentinel-home
+    depends_on:
+      discovery:
+        condition: service_healthy
+    healthcheck:
+      <<: *hc_defaults
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health"]
+
+volumes:
+  sentinel-home-producer:
+  sentinel-home-consumer:

@@ -1,0 +1,86 @@
+{
+  "id": "TASK-061",
+  "title": "Containerization: Dockerfiles for Discovery and Sentinel, Minimal Images, SBOM Generation, Image Signing",
+  "component": "infra/docker",
+  "status": "pending",
+  "description": "Create production-grade Dockerfiles for the Discovery Service, Sentinel, and Discovery UI using multi-stage builds to minimize image size. Images must run as non-root, include healthchecks, and be built reproducibly. Integrate supply-chain security controls: generate SBOM (Software Bill of Materials) in CycloneDX format during CI builds, and sign images with cosign. Provide a docker-compose override for the full local development stack.",
+  "objectives": [
+    "Multi-stage Dockerfile for Discovery Service (Python): build wheels stage + slim runtime stage",
+    "Multi-stage Dockerfile for Sentinel (Python): same pattern, include sentinelctl CLI",
+    "Multi-stage Dockerfile for Discovery UI (React/Vite): Node build stage + nginx serve stage",
+    "All images run as non-root (UID 1001), expose ports > 1024, include HEALTHCHECK",
+    "Generate CycloneDX SBOM via syft during CI and attach to release artifacts",
+    "Sign images with cosign (keyless in CI via OIDC) and verify in deploy pipeline"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      {
+        "step": 1,
+        "title": "Discovery Service Dockerfile (multi-stage Python)",
+        "detail": "File: `infra/docker/discovery/Dockerfile`. Stage 1 (builder): `FROM python:3.12-slim AS builder`. `WORKDIR /build`. Copy `pyproject.toml`, `requirements.lock`. Run `pip install --require-hashes -r requirements.lock --no-cache-dir --target /build/packages`. Stage 2 (runtime): `FROM python:3.12-slim AS runtime`. `RUN adduser -u 1001 -D -s /sbin/nologin appuser`. `WORKDIR /app`. Copy `/build/packages` to `/app/packages`. Set `ENV PYTHONPATH=/app/packages`. Copy application source. `RUN chown -R appuser:appuser /app`. `USER appuser`. Expose port 8000. `HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live')\" || exit 1`. `CMD [\"uvicorn\", \"discovery.main:app\", \"--host\", \"0.0.0.0\", \"--port\", \"8000\", \"--workers\", \"1\"]`."
+      },
+      {
+        "step": 2,
+        "title": "Sentinel Dockerfile (multi-stage Python with CLI)",
+        "detail": "File: `infra/docker/sentinel/Dockerfile`. Same multi-stage pattern as Discovery. Additional: copy `$SENTINEL_HOME` as a volume mount point (create empty dir). Include `sentinelctl` CLI by copying `sentinel/cli/sentinelctl.py` and its entrypoint. In stage 2: copy the wheels for sentinelctl dependencies. Expose port 8080. In sentinel container, the `$SENTINEL_HOME` directory must be a named volume (not baked into image) to persist keys across restarts. `ENV SENTINEL_HOME=/sentinel-home`. Create `/sentinel-home` directory with `RUN mkdir -p /sentinel-home && chown appuser:appuser /sentinel-home`. VOLUME /sentinel-home."
+      },
+      {
+        "step": 3,
+        "title": "Discovery UI Dockerfile (Node build + nginx serve)",
+        "detail": "File: `infra/docker/discovery-ui/Dockerfile`. Stage 1 (builder): `FROM node:20-alpine AS builder`. `WORKDIR /build`. Copy `package.json`, `package-lock.json`. Run `npm ci --omit=dev`. Copy source. Run `npm run build` (outputs to `dist/`). Stage 2 (runtime): `FROM nginx:1.25-alpine AS runtime`. Copy `infra/docker/discovery-ui/nginx.conf` to `/etc/nginx/nginx.conf`. Copy `/build/dist` to `/usr/share/nginx/html`. `RUN adduser -u 1001 -D nginx-user && chown -R nginx-user:nginx-user /usr/share/nginx/html /var/cache/nginx /var/log/nginx`. `USER nginx-user`. Port 8080 (nginx listens on 8080 as non-root — default 80 requires root). `HEALTHCHECK CMD wget -qO- http://localhost:8080/ || exit 1`."
+      },
+      {
+        "step": 4,
+        "title": "nginx.conf for Discovery UI",
+        "detail": "File: `infra/docker/discovery-ui/nginx.conf`. Key settings: listen 8080; root /usr/share/nginx/html; server_name _. For SPA routing: `try_files $uri /index.html;` (handles React Router paths). Security headers: `add_header X-Frame-Options DENY; add_header X-Content-Type-Options nosniff; add_header Referrer-Policy no-referrer; add_header Content-Security-Policy \"default-src 'self'; script-src 'self'; connect-src 'self' {API_BASE};\"`. Gzip: `gzip on; gzip_types text/css application/javascript application/json`. Cache static assets: `location ~* \\.(js|css|png|ico|woff2)$ { expires 1y; add_header Cache-Control 'public, immutable'; }`. No server-side file listing."
+      },
+      {
+        "step": 5,
+        "title": "SBOM generation with syft",
+        "detail": "In CI pipeline (TASK-064), after each Docker build: run `syft <image_name> -o cyclonedx-json > sbom-<component>.json`. Attach SBOM as CI artifact and associate with GitHub Release. For Docker Hub or ECR: attach SBOM using `cosign attach sbom --sbom sbom-<component>.json <image_ref>`. Install syft: `curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin`. Run before signing. SBOM captures: all Python packages in image, system packages from apt/apk, and metadata (image digest, build time)."
+      },
+      {
+        "step": 6,
+        "title": "Image signing with cosign",
+        "detail": "Use keyless signing in CI via Sigstore OIDC (GitHub Actions OIDC token). In CI: `cosign sign --yes <image_digest>` after push. This signs with a certificate issued by Fulcio (Sigstore's CA) and logs to Rekor transparency log. In deploy pipeline: verify before pulling: `cosign verify --certificate-identity-regexp=<github_actions_URL> --certificate-oidc-issuer=https://token.actions.githubusercontent.com <image_digest>`. Install cosign: `go install github.com/sigstore/cosign/v2/cmd/cosign@latest` (or use pre-built binary). For air-gapped environments where Sigstore is unavailable: use key-based signing with `cosign sign --key cosign.key` (key stored in CI secrets)."
+      },
+      {
+        "step": 7,
+        "title": "Local development docker-compose",
+        "detail": "File: `infra/docker/docker-compose.dev.yml` extending base `docker-compose.yml` (TASK-010). Add `sentinel-producer` and `sentinel-consumer` services: use built images or `build: context: .` for local build. Add volumes for `sentinel-home-producer` and `sentinel-home-consumer` (named volumes). Add `discovery-ui` service using the UI Dockerfile. Override env vars for dev: `SENTINEL_UI_ENABLED=true`, `SENTINEL_UI_AUTH=none`, `DISCOVERY_UI_OIDC_AUTHORITY=http://keycloak:8080/realms/discovery` (keycloak container for local OIDC). Network: all services on `sentinel_net` internal network."
+      },
+      {
+        "step": 8,
+        "title": "Image size and security validation",
+        "detail": "After build: run `docker image inspect --format '{{.Size}}' <image>` and fail CI if Discovery > 300MB or Sentinel > 300MB or UI > 50MB. Run `trivy image --exit-code 1 --severity HIGH,CRITICAL <image>` to scan for vulnerabilities in base image and dependencies. Trivy should be run AFTER pip install --require-hashes to ensure scanned packages match what's installed. Fail CI on any CRITICAL or HIGH CVE in final image. Document: which base image version is used, schedule for base image update (monthly or on CVE disclosure)."
+      }
+    ]
+  },
+  "project_structure": {
+    "files": {
+      "infra/docker/discovery/Dockerfile": "Discovery Service multi-stage Python Dockerfile",
+      "infra/docker/sentinel/Dockerfile": "Sentinel multi-stage Python Dockerfile",
+      "infra/docker/discovery-ui/Dockerfile": "Discovery UI Node+nginx Dockerfile",
+      "infra/docker/discovery-ui/nginx.conf": "nginx configuration for SPA serving",
+      "infra/docker/docker-compose.dev.yml": "Local dev compose override",
+      ".dockerignore": "Exclude __pycache__, .venv, node_modules, .git, tests, *.md"
+    }
+  },
+  "security_constraints": [
+    "All images run as UID 1001 — confirmed via `docker run --user check` in CI validation",
+    "Base images pinned to digest in production Dockerfiles: `FROM python:3.12-slim@sha256:...` — prevents supply-chain attack via floating tag mutation",
+    "No SSH keys, API tokens, or .env files copied into image — enforced by .dockerignore",
+    "HEALTHCHECK must exercise the actual health endpoint (not just `echo 'alive'`)",
+    "Image must not contain pip, setuptools residue from build stage in runtime stage — multi-stage ensures separation"
+  ],
+  "dependencies": ["TASK-009", "TASK-021", "TASK-037"],
+  "acceptance_criteria": [
+    "Discovery image size < 300MB",
+    "Sentinel image size < 300MB",
+    "UI image size < 50MB",
+    "All images run as UID 1001 (confirmed with docker inspect)",
+    "SBOM generated and attached to CI artifacts for each build",
+    "cosign verify succeeds on signed images in deploy pipeline",
+    "trivy scan finds no CRITICAL CVEs in final images"
+  ]
+}

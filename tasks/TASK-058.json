@@ -1,0 +1,84 @@
+{
+  "id": "TASK-058",
+  "title": "Discovery UI: Service and Sentinel Management (enrollment, status, multi-instance view)",
+  "component": "discovery_ui/pages/services_sentinels",
+  "status": "pending",
+  "description": "Implement the Services and Sentinels management pages in the Discovery UI. The Services page allows listing, creating, and editing service registrations. The Sentinels page shows all registered sentinel instances with their DID, role, status, heartbeat info, and drill-down per sentinel. The enrollment flow allows admins to create enrollment tokens, optionally approve them (prod), and display the one-time token with copy functionality and a security warning. Integrates with the audit log to show recent actions per sentinel/service.",
+  "objectives": [
+    "Services page: table with service_id, env, owner_did, status, last_descriptor_update; create/edit modals",
+    "Sentinels page: table with sentinel_did (truncated), role, env, service_id, status, last_seen; instance drill-down",
+    "Enrollment flow UI: create enrollment token, optional approval button (prod), one-time token display with copy+warning",
+    "Sentinel detail modal: full DID, all instances, heartbeat history, recent audit actions",
+    "Status badges: active (green), degraded (orange), offline (red), pending (grey)",
+    "Pagination and search for both tables"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      {
+        "step": 1,
+        "title": "Services page implementation",
+        "detail": "File `src/pages/ServicesPage.tsx`. Components: `ServiceTable` (MUI DataGrid or Table), `CreateServiceModal`, `EditServiceModal`. API calls: `GET /api/v1/services` with query params `{env, status, page, page_size=25}`. Columns: service_id, env, owner_did (truncated to 20 chars + tooltip with full value), status chip, last_descriptor_update (relative time), actions (Edit, View Descriptor). Create modal fields: service_id (validated: [a-z0-9-]+, max 64), env (select: prod/test/dev), owner_did (text, validated did: prefix), description. On submit: `POST /api/v1/services` — show success snackbar or error inline. Search: text input filters by service_id or owner_did prefix."
+      },
+      {
+        "step": 2,
+        "title": "Sentinels page implementation",
+        "detail": "File `src/pages/SentinelsPage.tsx`. Components: `SentinelTable`, `SentinelDetailDrawer` (right-side drawer). API calls: `GET /api/v1/sentinels?env=&role=&status=&page=&page_size=25`. Columns: sentinel_did_hash (SHA-256 first 12 chars, full DID in tooltip), role (chip: producer/consumer), env, service_id (link to Services page), status (colored chip), last_seen (relative + actual tooltip). Filter controls: env dropdown, role dropdown, status dropdown. Drill-down: click row opens `SentinelDetailDrawer` showing: full DID, all instance_id + endpoint URLs + health, last 10 heartbeat timestamps, recent 5 audit events."
+      },
+      {
+        "step": 3,
+        "title": "Enrollment token creation flow",
+        "detail": "Component `CreateEnrollmentForm` in `src/components/enrollment/`. Step 1 — Form: select associated service_id, env, role (producer/consumer), expiry_hours (default 24, max 168). Step 2 — Created: display enrollment token in a monospace text box with: (1) 'Copy Token' button using clipboard API. (2) Security warning banner: 'This token is displayed only once and cannot be retrieved again. Transmit it via a secure channel only.'. (3) Countdown showing token expiry. (4) 'Done' button clears token from UI state (prevents accidental re-display). API call: `POST /api/v1/sentinels/enrollments`. If `approval_required=true` in response: show 'Pending Approval' status with Approve button (security-admin role check via user claims)."
+      },
+      {
+        "step": 4,
+        "title": "Enrollment approval workflow",
+        "detail": "On Sentinels page: show a 'Pending Approvals' section if user has `security-admin` role (check via OIDC user claims). List pending enrollments: `{id, created_at, requested_by, service_id, env, role, expires_at}`. Each row has 'Approve' and 'Reject' buttons. 'Approve': calls `PATCH /api/v1/sentinels/enrollments/{id}/approve` — show confirmation dialog first ('Are you sure? This will allow a new sentinel to join.'. 'Reject': calls `PATCH /api/v1/sentinels/enrollments/{id}/reject` — inline. Both actions refetch the approvals list. If user does not have security-admin claim: approvals section is not rendered (client-side, API also enforces)."
+      },
+      {
+        "step": 5,
+        "title": "Status badge color system",
+        "detail": "Create `StatusChip` component in `src/components/common/StatusChip.tsx`. Props: `status: string`. Color mapping: `{active: 'success', degraded: 'warning', offline: 'error', pending: 'default', expired: 'default', revoked: 'error'}`. Use MUI `Chip` with `color` prop. Also add pulsing CSS animation on 'active' chips: `@keyframes pulse {0% {opacity:1} 50% {opacity:0.7} 100% {opacity:1}}` applied via `sx`. Reuse `StatusChip` across Services, Sentinels, Credentials, and Revocations pages for consistency."
+      },
+      {
+        "step": 6,
+        "title": "Audit snippet per sentinel/service",
+        "detail": "Component `AuditSnippet` in `src/components/audit/AuditSnippet.tsx`. Props: `entityType: 'sentinel'|'service', entityId: string`. API call: `GET /api/v1/audit/events?target_id={entityId}&limit=5`. Display as timeline list: icon + action text + relative time + actor_did_hash (8 chars). Examples: 'SENTINEL_ENROLLED 2h ago by did:key:z6M...', 'CONFIG_BUNDLE_ISSUED 30m ago'. Click 'View Full Audit →' links to Audit page with pre-filled filter. Used in SentinelDetailDrawer and service detail view."
+      },
+      {
+        "step": 7,
+        "title": "Tests",
+        "detail": "Test file: `src/pages/__tests__/ServicesPage.test.tsx` and `SentinelsPage.test.tsx`. Using MSW for API mocking. Cases: (1) Services table renders mock rows; (2) Create service form validates service_id regex; (3) Enrollment token displayed in monospace with copy button; (4) Token display area cleared after 'Done' button; (5) Approval section only visible for security-admin role; (6) Sentinel drill-down opens drawer with correct DID; (7) Pagination calls API with updated page param; (8) Status chip renders correct color for each status."
+      }
+    ]
+  },
+  "project_structure": {
+    "files": {
+      "discovery-ui/src/pages/ServicesPage.tsx": "Services listing and CRUD",
+      "discovery-ui/src/pages/SentinelsPage.tsx": "Sentinels listing with drill-down",
+      "discovery-ui/src/components/enrollment/CreateEnrollmentForm.tsx": "Enrollment token creation flow",
+      "discovery-ui/src/components/enrollment/ApprovalList.tsx": "Pending enrollment approvals",
+      "discovery-ui/src/components/common/StatusChip.tsx": "Reusable status badge",
+      "discovery-ui/src/components/audit/AuditSnippet.tsx": "Inline audit timeline",
+      "discovery-ui/src/api/sentinels.ts": "Typed API functions for sentinel management",
+      "discovery-ui/src/api/services.ts": "Typed API functions for service management",
+      "discovery-ui/src/pages/__tests__/ServicesPage.test.tsx": "Services page tests",
+      "discovery-ui/src/pages/__tests__/SentinelsPage.test.tsx": "Sentinels page tests"
+    }
+  },
+  "security_constraints": [
+    "Enrollment token displayed only once — component must clear token from state on close/done, never persist in localStorage",
+    "Approval buttons only rendered for users with security-admin claim — server also enforces RBAC",
+    "Full DID values shown only in tooltips/drawers — not in paginated table to limit exposure in screenshots",
+    "Clipboard API usage requires HTTPS (enforced by browser in non-localhost origins)",
+    "Service_id input validated client-side with regex before submit — prevent injection via form field"
+  ],
+  "dependencies": ["TASK-057", "TASK-024", "TASK-025", "TASK-033"],
+  "acceptance_criteria": [
+    "Services page renders, paginates, and supports create via modal",
+    "Enrollment token shown once, clears on 'Done', and includes security warning",
+    "Approval section only visible to security-admin role",
+    "Sentinel detail drawer shows all instances and heartbeat history",
+    "Status chips use correct MUI color for each status value",
+    "All 8 test cases pass"
+  ]
+}

@@ -1,0 +1,114 @@
+{
+  "id": "TASK-021",
+  "title": "Discovery Service: FastAPI Application Foundation, Configuration Management, and Service Structure",
+  "component": "discovery-service",
+  "status": "not-started",
+  "description": "Bootstrap the Discovery Service FastAPI application with async architecture, Pydantic v2 settings, router structure, middleware (request ID, correlation ID, structured logging), standardized error handling (RFC 7807 problem+json), OpenAPI tagging, and versioned endpoints at /api/v1. This is the structural foundation that all subsequent Discovery Service tasks build upon.",
+  "objectives": [
+    "Stable async FastAPI foundation supporting multiple routers and admin UI",
+    "Deterministic per-env configuration via Pydantic Settings with no secret leakage",
+    "Request observability from the very first version"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      "Step 1 - Application Factory: Create create_app() factory in services/discovery/src/discovery/app.py. Instantiate FastAPI(title='Discovery Service', version='0.1.0', docs_url='/docs', openapi_url='/openapi.json'). Register all routers under prefix /api/v1. Add lifespan context manager (startup: init DB pool, init chain client; shutdown: close DB pool).",
+      "Step 2 - Settings (Pydantic BaseSettings): In src/discovery/config.py. DiscoverySettings: database_url: SecretStr, redis_url: SecretStr, jwt_issuer_key_id: str, jwt_issuer_did: str, env: Literal['dev','test','prod'] = 'dev', allowed_cors_origins: list[str] = [], blockchain_rpc_url: str, chain_id: int = 31337, secret_storage_backend: Literal['local','vault'] = 'local'. Load from environment variables. Validate at startup — fail with clear message if DATABASE_URL missing.",
+      "Step 3 - Router Structure: In src/discovery/api/v1/: routers/__init__.py, routers/health.py, routers/apps.py, routers/services.py, routers/sentinels.py, routers/enrollments.py, routers/credentials.py, routers/revocations.py, routers/status_lists.py, routers/chain.py, routers/audit.py. Each router registered with its prefix and tags in app.py.",
+      "Step 4 - Middleware Stack (order matters): (1) TrustedHostMiddleware (HTTPS redirect in non-dev), (2) RequestMiddleware: generate/propagate X-Request-ID and X-Correlation-ID, (3) RequestLoggingMiddleware from common.telemetry.middleware: log method, path, status, duration_ms, (4) CompressionMiddleware (gzip). Middleware defined in src/discovery/middleware/.",
+      "Step 5 - Error Handling (RFC 7807 Problem+JSON): Create ProblemDetail Pydantic model: type (URI), title, status, detail, instance (request path), request_id. Register exception handlers: RequestValidationError → 422 with details, HTTPException → use status code, generic Exception → 500 with opaque detail (no stack trace exposure). Content-Type: application/problem+json.",
+      "Step 6 - Dependency Injection Setup: Create src/discovery/dependencies.py. Provide: get_db() — AsyncSession from pool, get_settings() — cached DiscoverySettings, get_redis() — Redis connection pool. Used with Depends() on all router endpoints.",
+      "Step 7 - Health Endpoints: GET /health/live → {status: 'ok', service: 'discovery'}. GET /health/ready → checks DB (SELECT 1), Redis (PING), optional chain RPC (eth_blockNumber). Returns 200 if ready, 503 if not. These are K8s probe endpoints.",
+      "Step 8 - Secure Headers Middleware: Add security headers on every response: X-Content-Type-Options: nosniff, X-Frame-Options: DENY, Referrer-Policy: no-referrer, Strict-Transport-Security: max-age=63072000 (non-dev only). Use starlette middleware.",
+      "Step 9 - CORS Configuration: CORSMiddleware with allow_origins=settings.allowed_cors_origins, allow_methods=['GET','POST','PATCH','DELETE'], allow_headers=['Authorization','Content-Type','X-Request-ID'], allow_credentials=True. Default: empty allowed_origins (all blocked). Trust only explicitly configured UI origins.",
+      "Step 10 - Entry Point: src/discovery/main.py: import uvicorn, create app, run with host=0.0.0.0, port=8000, log_config=None (use structlog). uvicorn access logs disabled — replaced by RequestLoggingMiddleware."
+    ],
+    "project_structure": {
+      "files": {
+        "services/discovery/src/discovery/": {
+          "__init__.py": "",
+          "app.py": "FastAPI factory + lifespan",
+          "main.py": "uvicorn entry point",
+          "config.py": "DiscoverySettings",
+          "dependencies.py": "DI providers",
+          "middleware/": {
+            "__init__.py": "",
+            "request_id.py": "",
+            "logging.py": ""
+          },
+          "api/": {
+            "v1/": {
+              "routers/": "One file per domain resource"
+            }
+          },
+          "models/": "SQLAlchemy ORM models (TASK-022)",
+          "services/": "Business logic layer",
+          "repositories/": "Data access layer"
+        },
+        "services/discovery/tests/": {
+          "conftest.py": "pytest fixtures",
+          "test_health.py": "",
+          "test_middleware.py": ""
+        },
+        "services/discovery/pyproject.toml": ""
+      }
+    },
+    "api_endpoints": [
+      {
+        "method": "GET",
+        "path": "/health/live",
+        "response": {"status": "ok", "service": "discovery"},
+        "auth": "none"
+      },
+      {
+        "method": "GET",
+        "path": "/health/ready",
+        "response": {"status": "ok", "checks": {"db": "ok", "redis": "ok", "chain": "ok"}},
+        "auth": "none"
+      }
+    ],
+    "error_handling": {
+      "problem_detail_example": {
+        "type": "https://discovery.sentinel.example/errors/validation-error",
+        "title": "Validation Error",
+        "status": 422,
+        "detail": "Field 'env' must be one of: dev, test, prod",
+        "instance": "/api/v1/services",
+        "request_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+      },
+      "error_codes": [
+        {"code": "VALIDATION_ERROR", "http": 422, "description": "Request body/param validation failure"},
+        {"code": "UNAUTHORIZED", "http": 401, "description": "Missing or invalid authentication"},
+        {"code": "FORBIDDEN", "http": 403, "description": "Insufficient permissions for action"},
+        {"code": "NOT_FOUND", "http": 404, "description": "Resource not found"},
+        {"code": "CONFLICT", "http": 409, "description": "Resource already exists or state conflict"},
+        {"code": "INTERNAL_ERROR", "http": 500, "description": "Unexpected internal error"}
+      ]
+    },
+    "security_constraints": [
+      "Stack traces MUST NOT appear in error responses — wrap all unhandled exceptions and log internally",
+      "X-Request-ID generated server-side if not provided — client-provided values accepted only if UUID4 format valid",
+      "CORS allow_origins MUST be empty by default — require explicit configuration per environment",
+      "docs_url (/docs) MUST be disabled in production environments — set to None if env == 'prod'",
+      "Pydantic SecretStr for all sensitive settings — never expose raw values in logs or error messages"
+    ]
+  },
+  "technical_requirements": [
+    "FastAPI >= 0.111.0",
+    "pydantic >= 2.7.0",
+    "pydantic-settings >= 2.2.0",
+    "uvicorn[standard] >= 0.29.0",
+    "starlette >= 0.37.0"
+  ],
+  "dependencies": [
+    "TASK-009",
+    "TASK-012"
+  ],
+  "acceptance_criteria": [
+    "Discovery starts and serves OpenAPI UI at /docs in dev mode",
+    "GET /health/live returns 200 without DB connection",
+    "GET /health/ready returns 503 if DB is unavailable",
+    "All responses include X-Request-ID header",
+    "Unhandled exception returns 500 problem+json without stack trace",
+    "CORS blocks requests from unlisted origins"
+  ]
+}

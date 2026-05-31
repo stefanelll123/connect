@@ -1,0 +1,47 @@
+@startuml c4-component-discovery
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml
+
+LAYOUT_WITH_LEGEND()
+
+title Component Diagram — Discovery Service [C4 Level 3]
+
+Container_Boundary(discovery, "Discovery Service") {
+    Component(api_gateway, "API Layer", "FastAPI routers", "HTTP routing, request validation, auth middleware")
+    Component(auth_mw, "Auth Middleware", "FastAPI dependency", "mTLS client cert validation, enrollment token check, admin API key check")
+    Component(service_mgr, "Service Manager", "Python service", "CRUD for Producer/Consumer service registrations")
+    Component(sentinel_mgr, "Sentinel Manager", "Python service", "Sentinel registration, enrollment token lifecycle")
+    Component(vc_issuer, "VC Issuer", "Python service", "Issues AccessGrantCredentials; signs with issuer key via Vault")
+    Component(status_mgr, "Status List Manager", "Python service", "Bitstring Status List creation, revocation, publication")
+    Component(config_bundler, "Config Bundler", "Python service", "Assembles and signs config bundles for Sentinels")
+    Component(chain_client, "Blockchain Client", "Web3.py", "Reads/writes SentinelRegistry, IssuerRegistry, StatusListAnchor")
+    Component(audit_logger, "Audit Logger", "structlog", "Emits append-only JSON audit entries to log store")
+    Component(vault_client, "Vault Client", "hvac / requests", "Reads issuer signing key, stores enrollment tokens")
+}
+
+ContainerDb(db, "PostgreSQL", "asyncpg", "Persistent store")
+ContainerDb(redis, "Redis", "aioredis", "Cache + blacklist")
+
+Rel(api_gateway, auth_mw, "Applies per-route")
+Rel(api_gateway, service_mgr, "POST /services, PATCH /services/{id}")
+Rel(api_gateway, sentinel_mgr, "POST /sentinels, POST /enrollment-tokens")
+Rel(api_gateway, vc_issuer, "POST /credentials")
+Rel(api_gateway, status_mgr, "POST /revoke, GET /status/{list_id}")
+Rel(api_gateway, config_bundler, "GET /config")
+
+Rel(sentinel_mgr, vault_client, "Stores enrollment token")
+Rel(sentinel_mgr, chain_client, "Registers Sentinel on-chain")
+Rel(vc_issuer, vault_client, "Reads issuer signing key")
+Rel(status_mgr, chain_client, "Anchors status list hash")
+Rel(config_bundler, vault_client, "Signs config bundle")
+
+Rel(service_mgr, db, "CRUD")
+Rel(sentinel_mgr, db, "CRUD")
+Rel(vc_issuer, db, "Stores VC metadata")
+Rel(status_mgr, db, "Stores bitstring")
+Rel(audit_logger, db, "Appends audit records")
+
+Rel(auth_mw, redis, "Token blacklist check")
+Rel(chain_client, redis, "Caches chain reads")
+
+SHOW_LEGEND()
+@enduml

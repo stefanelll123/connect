@@ -1,0 +1,86 @@
+{
+  "id": "TASK-053",
+  "title": "Sentinel: Security Hardening (TLS config, mTLS enforcement, file permissions, container hardening, dependency pinning)",
+  "component": "sentinel/hardening",
+  "status": "pending",
+  "description": "Apply comprehensive security hardening to the sentinel runtime: TLS 1.2+ enforcement with strong cipher suites, mTLS for Sentinel↔Discovery and optional Sentinel↔Sentinel communication, startup file permission validation, container runtime hardening (non-root, read-only FS, capability drop, seccomp), and supply-chain controls via dependency pinning and SCA in CI. This task produces no new functional code — it hardens the existing runtime against infrastructure-level attacks.",
+  "objectives": [
+    "Enforce TLS 1.2+ on all outbound HTTPX connections via ssl.SSLContext configuration",
+    "mTLS: enforce for all Sentinel→Discovery calls; configure optionally for Sentinel↔Sentinel",
+    "Startup file permission check: fail-fast if key files are world-readable (not 0600/0700)",
+    "Certificate pinning for Discovery server certificate in sensitive environments",
+    "Container hardening: non-root user, read-only rootfs, drop ALL capabilities, seccomp profile",
+    "Dependency pinning: pin all dependencies to exact versions in requirements.txt, run SCA in CI"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      {
+        "step": 1,
+        "title": "TLS SSLContext configuration for all outbound connections",
+        "detail": "In `libs/common/tls/context.py`, function `create_strict_ssl_context(ca_cert_path: str | None = None, client_cert_path: str | None = None, client_key_path: str | None = None) -> ssl.SSLContext`. Steps: (1) Create `ssl.create_default_context(purpose=ssl.Purpose.SERVER_AUTH)`. (2) Set `ctx.minimum_version = ssl.TLSVersion.TLSv1_2`. (3) Set secure cipher suites: `ctx.set_ciphers('ECDHE+AESGCM:ECDHE+CHACHA20:DHE+AESGCM:!aNULL:!eNULL:!EXPORT:!DES:!RC4:!3DES')`. (4) Set `ctx.options |= ssl.OP_NO_COMPRESSION`. (5) If `ca_cert_path`: load custom CA `ctx.load_verify_locations(ca_cert_path)`. (6) If `client_cert_path` and `client_key_path`: load mTLS client certificate `ctx.load_cert_chain(client_cert_path, client_key_path)`. Return context. Apply to all `httpx.AsyncClient` instances via `httpx.AsyncClient(verify=ctx)` or `httpx.AsyncClient(cert=(cert, key), verify=ca_cert)`."
+      },
+      {
+        "step": 2,
+        "title": "mTLS enforcement for Discovery client",
+        "detail": "DiscoveryClient (TASK-040) MUST use mTLS. Load cert/key/CA from config: `SENTINEL_MTLS_CERT=$SENTINEL_HOME/.sentinel/mtls/client.crt`, `SENTINEL_MTLS_KEY=$SENTINEL_HOME/.sentinel/mtls/client.key`, `SENTINEL_MTLS_CA=$SENTINEL_HOME/.sentinel/mtls/ca.crt`. At startup, call `create_strict_ssl_context(ca_cert, client_cert, client_key)`. Pass resulting context to all HTTPX client instances used for Discovery calls. If cert files are missing or unreadable: fail startup with `ConfigurationError: mTLS certificates required for Discovery connection`. In Kubernetes: mount certs via Kubernetes Secret volume (not env vars)."
+      },
+      {
+        "step": 3,
+        "title": "Certificate pinning for Discovery",
+        "detail": "Optional but recommended in `prod` environment. Function `check_cert_fingerprint(ssl_socket, expected_sha256: str) -> None` in `libs/common/tls/pinning.py`. After TLS handshake: call `ssl_socket.getpeercert(binary_form=True)`, compute `hashlib.sha256(cert_der).hexdigest()`, compare with `DISCOVERY_CERT_FINGERPRINT` env var (constant-time compare). If mismatch: raise `CertificatePinViolation`, log CRITICAL, refuse connection. Only active when `SENTINEL_CERT_PINNING=true` and env is `prod`. Note: pinning requires certificate rotation procedure documented in TASK-049 runbook."
+      },
+      {
+        "step": 4,
+        "title": "Startup file permission validation",
+        "detail": "Function `check_file_permissions() -> None` in `sentinel/core/startup.py`. Called as the FIRST thing in app startup (before any other initialization). For each file in the list below, check using `os.stat()`: `$SENTINEL_HOME/.sentinel/store/` (must be 0700), `$SENTINEL_HOME/.sentinel/store/did_key.enc` (must be 0600), all `*.enc` files in store/ (must be 0600), `$SENTINEL_HOME/.sentinel/mtls/client.key` (must be 0600). If any file has group-read or world-read bits set (`stat.S_IRGRP | stat.S_IROTH`): log CRITICAL and raise `InsecureFilePermissions(path, mode)`. Exit with code 1. This prevents running with accidentally world-readable keys."
+      },
+      {
+        "step": 5,
+        "title": "Container hardening: Dockerfile and Kubernetes configuration",
+        "detail": "Dockerfile (extends TASK-061): (1) `RUN adduser -u 1001 -D sentinel` and `USER sentinel`. (2) `WORKDIR /app` with `RUN chown sentinel:sentinel /app`. (3) No SUID binaries: `RUN find / -perm +6000 -type f -exec chmod -x {} \\; || true`. (4) `HEALTHCHECK CMD python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/health/live')\"`. Kubernetes PodSpec (extends TASK-062): `securityContext: runAsUser: 1001, runAsNonRoot: true, readOnlyRootFilesystem: true, allowPrivilegeEscalation: false, capabilities: drop: [ALL]`. Mount writable volumes explicitly: `sentinel-logs` (emptyDir), `sentinel-store` (PVC), `sentinel-mtls` (Secret volume). Apply `seccompProfile: type: RuntimeDefault`."
+      },
+      {
+        "step": 6,
+        "title": "Dependency pinning and SCA",
+        "detail": "Run `pip-compile pyproject.toml --generate-hashes -o requirements.lock` to generate hash-pinned requirements file. Check into source control. In CI (TASK-064): run `pip install --require-hashes -r requirements.lock` for reproducible builds. SCA: run `pip-audit -r requirements.lock --desc on` in CI. Policy: block merge on any CRITICAL or HIGH severity CVE in direct or transitive dependencies. For Node.js (frontend): use `npm ci` with package-lock.json committed. Run `npm audit --audit-level=high`. Alert PagerDuty/Slack on SCA findings in scheduled weekly scans."
+      },
+      {
+        "step": 7,
+        "title": "Disable weak TLS on inbound listener",
+        "detail": "If sentinel exposes an inbound HTTPS server (producer mode with direct TLS termination, as opposed to Kubernetes ingress TLS): configure uvicorn with `ssl_version=TLSv1_2`, `ssl_ciphers='ECDHE+AESGCM:ECDHE+CHACHA20'`. In Kubernetes, TLS termination is handled by ingress — sentinel listens HTTP internally. In bare-metal/VM mode: document in deployment guide that TLS 1.0 and 1.1 must be disabled at nginx/load-balancer level, and provide sample nginx.conf snippet."
+      },
+      {
+        "step": 8,
+        "title": "Hardening validation tests",
+        "detail": "Test file: `tests/security/test_hardening.py`. Cases: (1) startup fails when did_key.enc is world-readable (chmod 0644, assert startup raises); (2) HTTPX client refuses TLS 1.1 connection (mock server, assert SSLError); (3) Certificate fingerprint mismatch raises CertificatePinViolation when pinning enabled; (4) cipher negotiation does not use RC4 or DES (inspect negotiated cipher in test); (5) container runs as UID 1001 (check /etc/passwd in integration test). Run test (1) and (2) in CI; (5) only in Docker integration test."
+      }
+    ]
+  },
+  "project_structure": {
+    "files": {
+      "libs/common/tls/context.py": "create_strict_ssl_context() function",
+      "libs/common/tls/pinning.py": "Certificate fingerprint pinning check",
+      "sentinel/core/startup.py": "check_file_permissions() called at startup",
+      "docs/deployment/tls_configuration.md": "TLS setup guide for bare-metal and Kubernetes",
+      "docs/deployment/nginx_tls_sample.conf": "Sample nginx TLS config with TLS 1.2+ enforced",
+      "tests/security/test_hardening.py": "Security validation tests"
+    }
+  },
+  "security_constraints": [
+    "TLS 1.0 and 1.1 must be disabled — SSLContext.minimum_version = TLSv1_2 enforced in code, not just docs",
+    "mTLS is mandatory for Sentinel→Discovery — no fallback to one-way TLS in production",
+    "Container MUST run as non-root (UID 1001) — Kubernetes admission webhook should enforce runAsNonRoot",
+    "File permission check is non-bypassable — failure must exit the process, not log-and-continue",
+    "Certificate pinning must prevent MITM even if CA is compromised — relevant in shared CA environments",
+    "Dependencies pinned with hashes — build fails if any hash doesn't match (tamper detection)"
+  ],
+  "dependencies": ["TASK-038", "TASK-064", "TASK-062"],
+  "acceptance_criteria": [
+    "Startup fails with clear error when key files are group-readable or world-readable",
+    "All outbound HTTPX connections use TLS 1.2+ with strong cipher suites",
+    "mTLS cert loading is validated at startup — startup fails if cert files are absent in prod",
+    "Container image runs as UID 1001, passes `docker run --security-opt no-new-privileges`",
+    "SCA scan in CI blocks merge on HIGH/CRITICAL CVEs",
+    "All 5 hardening validation test cases pass"
+  ]
+}

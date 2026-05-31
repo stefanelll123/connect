@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "sentinel-discovery.fullname" . }}-config
+  labels:
+    {{- include "sentinel-discovery.labels" . | nindent 4 }}
+data:
+  LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  DEPLOYMENT_ENVIRONMENT: {{ .Values.env.DEPLOYMENT_ENVIRONMENT | quote }}
+  DISCOVERY_HOST: {{ .Values.env.DISCOVERY_HOST | default "0.0.0.0" | quote }}
+  DISCOVERY_PORT: {{ .Values.env.DISCOVERY_PORT | default "8000" | quote }}
+  OTEL_ENABLED: {{ .Values.env.OTEL_ENABLED | default "true" | quote }}
+  BLOCKCHAIN_CHAIN_ID: {{ .Values.config.blockchainChainId | quote }}
+  {{- if .Values.config.corsOrigins }}
+  DISCOVERY_CORS_ORIGINS: {{ .Values.config.corsOrigins | quote }}
+  {{- end }}
+  {{- if .Values.tls.enabled }}
+  TLS_CERT_FILE: /sentinel-certs/tls.crt
+  TLS_KEY_FILE: /sentinel-certs/tls.key
+  TLS_CA_FILE: /sentinel-certs/ca.crt
+  {{- end }}

@@ -1,0 +1,96 @@
+{
+  "id": "TASK-046",
+  "title": "Sentinel: Revocation Manager with Δ bounded-freshness, status list cache, and outage policies",
+  "component": "sentinel/libs/common/revocation",
+  "status": "pending",
+  "description": "Implement the sentinel's revocation checking module that enforces Δ-bounded freshness guarantees for credential status verification. The module maintains a local cache of StatusList bitstrings (encrypted on disk + in-memory), integrates with TrustLayerClient for on-chain anchors, verifies status list signatures, and enforces the Δ (maximum staleness) parameter from TrustPolicyRegistry. When the status list is stale beyond Δ, apply the configured outage policy (fail-closed by default). Also supports emergency on-chain revocation check for high-value credentials.",
+  "objectives": [
+    "Cache status lists on disk (encrypted) and in-memory, indexed by statusListId",
+    "For each check: get anchor from chain cache (TASK-042), download list if missing/hash-mismatch, verify signature + hash",
+    "Enforce Δ: if now - anchor.updatedAt > Δ_seconds, status is stale; apply configured policy",
+    "Implement background refresh scheduler: refresh at Δ/2 with per-instance jitter to avoid thundering herd",
+    "Implement emergency revoke check: query on-chain mapping for credentialIdHash for high-value credentials",
+    "Expose Prometheus metrics: revocation_checks_total, status_stale_total, cache_hit_ratio, download_latency"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      {
+        "step": 1,
+        "title": "Design status list cache structure",
+        "detail": "Class `StatusListCache` with two layers: (1) in-memory dict `{status_list_id: StatusListEntry}` where `StatusListEntry` has fields: `status_list_id: str`, `bitstring: bytes` (raw gzip-compressed bitstring), `root_hash: str` (SHA-256 of bitstring), `updated_at: float` (from anchor), `downloaded_at: float`, `signed_jwt: str` (original StatusListCredential JWT). (2) Persistent disk cache at `$SENTINEL_HOME/.sentinel/store/status_lists/{status_list_id}.bin.enc` encrypted with AES-256-GCM (SecretStorage from TASK-038). On startup: load all `.bin.enc` files into memory. Max memory: 50 status lists; LRU eviction beyond that."
+      },
+      {
+        "step": 2,
+        "title": "Implement status bit extraction",
+        "detail": "Function `get_status_bit(bitstring: bytes, index: int) -> bool`. The bitstring is base64url-decoded and gzip-decompressed. Treat result as a flat byte array where bit at `index` is byte `index // 8`, bit position `index % 8` (LSB-first as per Bitstring Status List v1.0 spec). Return True if bit is set (credential is revoked/suspended). Guard: if index >= len(decompressed_bitstring) * 8, raise `StatusListIndexOutOfRange`."
+      },
+      {
+        "step": 3,
+        "title": "Implement cache fetch with hash verification",
+        "detail": "Method `async get_verified_entry(status_list_id: str, trust_client: TrustLayerClient) -> StatusListEntry`. Steps: (1) Get anchor from `trust_client.get_status_anchor(status_list_id)` — contains `root_hash` and `updated_at`. (2) Check in-memory cache: if present AND `entry.root_hash == anchor.root_hash` AND age within TTL → return cached. (3) On mismatch or miss: download from Discovery public endpoint `GET /status/{status_list_id}` (no auth). (4) Parse StatusListCredential JWT — verify JWS signature using Discovery issuer DID. (5) Compute SHA-256 of downloaded bitstring. (6) Compare with `anchor.root_hash` — if mismatch, raise `StatusListHashMismatch` (integrity failure). (7) Store in both memory and encrypted disk cache."
+      },
+      {
+        "step": 4,
+        "title": "Implement Δ enforcement",
+        "detail": "Method `async check(credential_jti: str, status_list_id: str, status_list_index: int) -> RevocationCheckResult`. After obtaining verified entry: compute `staleness = time.time() - anchor.updated_at`. If `staleness > delta_seconds` (from policy params): record `stale_event` metric. Apply `REVOCATION_OUTAGE_POLICY`: (a) `fail_closed`: raise `RevocationStatusStale(staleness_seconds=staleness)` — pipeline returns 503; (b) `degrade`: return `RevocationCheckResult(is_revoked=False, stale=True)` — pipeline permits but marks context; (c) `use_cache`: return result ignoring staleness. Log WARNING on every stale serve: `event=revocation_stale status_list_id={id} staleness_seconds={n} policy={policy}`."
+      },
+      {
+        "step": 5,
+        "title": "Implement background refresh scheduler",
+        "detail": "Class `StatusListRefresher` as an asyncio background task. Maintains a refresh schedule: on each successful download, schedule next refresh at `now + Δ/2 + jitter` where `jitter = random.uniform(-Δ*0.1, Δ*0.1)`. This per-instance jitter prevents all sentinels from hammering Discovery simultaneously. On refresh failure: log WARNING, increment `status_list_refresh_errors_total` metric, retry at `now + 30s` (backoff). Stop refreshing deleted/expired status lists (not in recent VC set). Track active status_list_ids observed in recent check() calls as the refresh queue."
+      },
+      {
+        "step": 6,
+        "title": "Implement emergency revoke check",
+        "detail": "Method `async emergency_check(credential_jti: str) -> bool`. Used for high-value credentials where the producer config sets `REQUIRE_EMERGENCY_CHECK=True`. Calls `trust_client` chain client to query the `StatusRegistry.isEmergencyRevoked(credentialIdHash)` mapping, where `credentialIdHash = keccak256(credential_jti)`. This is a real-time on-chain read (not cached). On chain unavailability: apply TRUST_OUTAGE_POLICY (fail-closed returns True = assume revoked). This adds ~50-100ms latency per check — document in config that this should only be enabled for high-value operations."
+      },
+      {
+        "step": 7,
+        "title": "Configuration",
+        "detail": "ENV vars: `REVOCATION_OUTAGE_POLICY=fail_closed|degrade|use_cache` (default: fail_closed), `STATUS_LIST_MAX_CACHE_ENTRIES=50`, `STATUS_LIST_DISK_CACHE_PATH=$SENTINEL_HOME/.sentinel/store/status_lists/`, `REQUIRE_EMERGENCY_CHECK=false`. The `delta_seconds` (Δ) value is NOT configurable per-sentinel — it MUST come from `TrustPolicyRegistry.revocation_delta_seconds` (TASK-015) fetched via TrustLayerClient. This ensures all sentinels use the same Δ enforced by governance."
+      },
+      {
+        "step": 8,
+        "title": "Metrics and tests",
+        "detail": "Prometheus metrics: `revocation_checks_total{result: revoked|not_revoked|stale|error}`, `status_list_cache_hits_total`, `status_list_cache_misses_total`, `status_list_staleness_seconds{id}` Gauge, `status_list_download_duration_seconds` Histogram, `emergency_checks_total{result}`. Tests: (1) not-revoked bit returns False; (2) set bit returns True (credential revoked); (3) hash mismatch raises StatusListHashMismatch; (4) staleness > Δ with fail_closed raises RevocationStatusStale; (5) staleness with degrade returns stale=True; (6) background refresh updates cache; (7) emergency check returns True for on-chain revoked. Use mock chain client and mock Discovery HTTP."
+      }
+    ]
+  },
+  "project_structure": {
+    "files": {
+      "libs/common/revocation/__init__.py": "Exports RevocationManager, RevocationCheckResult, RevocationStatusStale",
+      "libs/common/revocation/cache.py": "StatusListCache with memory + encrypted disk layers",
+      "libs/common/revocation/manager.py": "RevocationManager with check() and emergency_check()",
+      "libs/common/revocation/refresher.py": "StatusListRefresher background task",
+      "libs/common/revocation/bitstring.py": "get_status_bit() per Bitstring Status List v1.0 spec",
+      "libs/common/revocation/metrics.py": "Prometheus metric definitions",
+      "tests/unit/revocation/test_manager.py": "Unit tests for all revocation scenarios"
+    }
+  },
+  "domain_entities": [
+    {
+      "name": "StatusListEntry",
+      "fields": "status_list_id: str, bitstring: bytes (raw), root_hash: str, updated_at: float (from chain anchor), downloaded_at: float, signed_jwt: str"
+    },
+    {
+      "name": "RevocationCheckResult",
+      "fields": "is_revoked: bool, stale: bool, stale_seconds: float, checked_at: float"
+    }
+  ],
+  "security_constraints": [
+    "StatusList JWT signature MUST be verified before trusting bitstring contents — prevents forged revocation lists",
+    "Root hash from on-chain anchor MUST match computed hash of downloaded bitstring — prevents tampered downloads",
+    "Disk cache files must have 0600 permissions — checked on startup, refuse to load if world-readable",
+    "Emergency check must fail-closed on chain unavailability to prevent bypass of revocation during outage",
+    "Δ parameter MUST come from governance chain — sentinel cannot self-configure a larger Δ to bypass staleness"
+  ],
+  "dependencies": ["TASK-007", "TASK-042", "TASK-038"],
+  "acceptance_criteria": [
+    "Revoked credential (bit set) returns is_revoked=True",
+    "Non-revoked credential returns is_revoked=False within TTL from cache",
+    "Status list with hash mismatch raises StatusListHashMismatch — never trusts tampered data",
+    "Staleness beyond Δ with fail_closed raises RevocationStatusStale",
+    "Background refresher updates cache before TTL expires under normal conditions",
+    "Emergency check correctly queries on-chain status for high-value credentials"
+  ]
+}

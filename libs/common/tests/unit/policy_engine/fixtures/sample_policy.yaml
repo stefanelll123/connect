@@ -1,0 +1,46 @@
+version: "1.0"
+issued_by: "did:key:z6MkTestIssuer"
+issued_at: "2025-01-01T00:00:00Z"
+
+rules:
+  # Exact path permit for data:read scope
+  - id: allow_read_data_v1
+    service_id: "service-a"
+    path_glob: "/api/v1/data"
+    method: "GET"
+    env: "prod"
+    required_scopes:
+      - "data:read"
+    decision: permit
+    priority: 10
+
+  # Glob permit for any path under /api/v1/
+  - id: allow_write_api_glob
+    service_id: "service-a"
+    path_glob: "/api/v1/*"
+    method: "POST"
+    env: "prod"
+    required_scopes:
+      - "data:write"
+    decision: permit
+    priority: 20
+
+  # Deny for admin paths regardless of scopes
+  - id: deny_admin
+    service_id: "*"
+    path_glob: "/admin/**"
+    method: "*"
+    env: "*"
+    required_scopes: []
+    decision: deny
+    priority: 5
+
+  # Default deny-all catch-all
+  - id: default_deny
+    service_id: "*"
+    path_glob: "**"
+    method: "*"
+    env: "*"
+    required_scopes: []
+    decision: deny
+    priority: 9999

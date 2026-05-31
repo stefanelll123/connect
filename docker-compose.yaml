@@ -1,0 +1,342 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: sentinel_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: sentinel_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sentinel_user -d sentinel_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - sentinel_net
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a ${REDIS_PASSWORD} ping | grep -e PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - sentinel_net
+
+  hardhat:
+    image: ghcr.io/foundry-rs/foundry:latest
+    user: "0:0"
+    entrypoint: ""
+    command: ["anvil", "--host", "0.0.0.0", "--port", "8545", "--chain-id", "31337", "--block-time", "1", "--steps-tracing", "--allow-origin", "*", "--state", "/data/anvil-state.json", "--state-interval", "60"]
+    ports:
+      - "8545:8545"
+    volumes:
+      - hardhat_data:/data
+    healthcheck:
+      test: ["CMD", "cast", "chain-id", "--rpc-url", "http://127.0.0.1:8545"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - sentinel_net
+
+  vault:
+    image: hashicorp/vault:1.16
+    cap_add:
+      - IPC_LOCK
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: root
+      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+      VAULT_ADDR: "http://0.0.0.0:8200"
+    ports:
+      - "8200:8200"
+    healthcheck:
+      test: ["CMD-SHELL", "VAULT_ADDR=http://127.0.0.1:8200 vault status"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - sentinel_net
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.100.0
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./deploy/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+      - "8889:8889"
+    healthcheck:
+      disable: true
+    networks:
+      - sentinel_net
+
+  discovery:
+    build:
+      context: .
+      dockerfile: services/discovery/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+asyncpg://sentinel_user:${POSTGRES_PASSWORD}@postgres:5432/sentinel_db
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      BLOCKCHAIN_RPC_URL: http://hardhat:8545
+      BLOCKCHAIN_CHAIN_ID: "31337"
+      BLOCKCHAIN_INTEGRATION: "true"
+      CONTRACT_ISSUER_REGISTRY: ${CONTRACT_ISSUER_REGISTRY:-}
+      CONTRACT_TRUST_POLICY_REGISTRY: ${CONTRACT_TRUST_POLICY_REGISTRY:-}
+      CONTRACT_STATUS_REGISTRY: ${CONTRACT_STATUS_REGISTRY:-}
+      CONTRACT_SERVICE_REGISTRY: ${CONTRACT_SERVICE_REGISTRY:-}
+      REGISTER_SERVICE_ON_CHAIN: ${REGISTER_SERVICE_ON_CHAIN:-false}
+      ANCHOR_STATUS_LISTS: ${ANCHOR_STATUS_LISTS:-false}
+      CHAIN_ANCHOR_PRIVATE_KEY: ${CHAIN_ANCHOR_PRIVATE_KEY:-}
+      DISCOVERY_PRIVATE_KEY_HEX: ${DISCOVERY_PRIVATE_KEY_HEX:-}
+      JWT_ISSUER_DID: ${JWT_ISSUER_DID:-}
+      JWT_ISSUER_KEY_ID: ${JWT_ISSUER_KEY_ID:-}
+      VERIFY_ISSUER_ON_CHAIN: ${VERIFY_ISSUER_ON_CHAIN:-false}
+      VAULT_ADDR: http://vault:8200
+      VAULT_TOKEN: root
+      SERVICE_NAME: discovery-service
+      SERVICE_VERSION: "0.1.0"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_ENABLED: "true"
+      DEPLOYMENT_ENVIRONMENT: dev
+      DISCOVERY_ENV: dev
+      DISCOVERY_HOST: "0.0.0.0"
+      DISCOVERY_PORT: "8000"
+      ALLOWED_CORS_ORIGINS: '["http://localhost:3000"]'
+      AUTH_MODE: oidc
+      OIDC_ISSUER_URL: http://localhost:8001/realms/discovery
+      OIDC_JWKS_URL: http://keycloak:8080/realms/discovery/protocol/openid-connect/certs
+      DISCOVERY_AUDIENCE: discovery
+    ports:
+      - "8201:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      vault:
+        condition: service_healthy
+      hardhat:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - sentinel_net
+
+  sentinel-producer:
+    build:
+      context: .
+      dockerfile: services/sentinel/Dockerfile
+    environment:
+      SENTINEL_ROLE: producer
+      BACKEND_URL: http://mock-backend:9000
+      INBOUND_URL: http://sentinel-producer:8080
+      SERVICE_ID: dev-sentinel-alpha
+      SENTINEL_ENV: dev
+      SENTINEL_HOME: /data
+      SENTINEL_PASSPHRASE: ${SENTINEL_PASSPHRASE:-dev-passphrase-change-in-prod}
+      DATABASE_URL: postgresql+asyncpg://sentinel_user:${POSTGRES_PASSWORD}@postgres:5432/sentinel_db
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/1
+      BLOCKCHAIN_RPC_URL: http://hardhat:8545
+      DISCOVERY_URL: http://discovery:8000
+      SECRET_STORAGE_MASTER_KEY: ${SECRET_STORAGE_MASTER_KEY}
+      SENTINEL_SECRET_BACKEND: local
+      SECRET_STORAGE_PATH: /data/secrets
+      SERVICE_NAME: sentinel-producer
+      SERVICE_VERSION: "0.1.0"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_ENABLED: "true"
+      DEPLOYMENT_ENVIRONMENT: dev
+      # Session exchange (SD-JWT fast-path)
+      SESSION_TOKEN_TTL: ${SESSION_TOKEN_TTL:-900}
+      SESSION_NONCE_TTL: ${SESSION_NONCE_TTL:-60}
+      SESSION_RATE_LIMIT_PER_MINUTE: ${SESSION_RATE_LIMIT_PER_MINUTE:-30}
+    ports:
+      - "8100:8080"
+    volumes:
+      - sentinel_producer_data:/data
+    depends_on:
+      discovery:
+        condition: service_healthy
+      hardhat:
+        condition: service_healthy
+    networks:
+      - sentinel_net
+
+  sentinel-consumer:
+    build:
+      context: .
+      dockerfile: services/sentinel/Dockerfile
+    environment:
+      SENTINEL_ROLE: consumer
+      SERVICE_ID: dev-sentinel-beta
+      SENTINEL_ENV: dev
+      SENTINEL_HOME: /data
+      SENTINEL_PASSPHRASE: ${SENTINEL_PASSPHRASE:-dev-passphrase-change-in-prod}
+      DATABASE_URL: postgresql+asyncpg://sentinel_user:${POSTGRES_PASSWORD}@postgres:5432/sentinel_db
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/2
+      BLOCKCHAIN_RPC_URL: http://hardhat:8545
+      DISCOVERY_URL: http://discovery:8000
+      SECRET_STORAGE_MASTER_KEY: ${SECRET_STORAGE_MASTER_KEY}
+      SENTINEL_SECRET_BACKEND: local
+      SECRET_STORAGE_PATH: /data/secrets
+      SERVICE_NAME: sentinel-consumer
+      SERVICE_VERSION: "0.1.0"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_ENABLED: "true"
+      DEPLOYMENT_ENVIRONMENT: dev
+    ports:
+      - "8101:8080"
+    volumes:
+      - sentinel_consumer_data:/data
+    depends_on:
+      discovery:
+        condition: service_healthy
+      hardhat:
+        condition: service_healthy
+    networks:
+      - sentinel_net
+
+  discovery-ui:
+    build:
+      context: ./frontend/discovery-ui
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: http://localhost:8201/api/v1
+        VITE_OIDC_AUTHORITY: http://localhost:8001/realms/discovery
+        VITE_OIDC_CLIENT_ID: discovery-ui
+    ports:
+      - "3000:80"
+    depends_on:
+      discovery:
+        condition: service_healthy
+    networks:
+      - sentinel_net
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0
+    command: start-dev --import-realm
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      KC_HTTP_PORT: "8080"
+      KC_HOSTNAME_URL: http://localhost:8001
+      KC_HOSTNAME_STRICT: "false"
+      KC_HOSTNAME_STRICT_HTTPS: "false"
+      KC_HTTP_ENABLED: "true"
+    ports:
+      - "8001:8080"
+    volumes:
+      - ./deploy/keycloak:/opt/keycloak/data/import:ro
+      - keycloak_data:/opt/keycloak/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/realms/discovery/.well-known/openid-configuration || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 120s
+    networks:
+      - sentinel_net
+
+  mock-backend:
+    image: python:3.12-slim
+    command:
+      - python
+      - "-c"
+      - |
+          from http.server import HTTPServer, BaseHTTPRequestHandler
+          import json
+
+          class Handler(BaseHTTPRequestHandler):
+              def do_GET(self): self._respond()
+              def do_POST(self): self._respond()
+              def do_PUT(self): self._respond()
+              def do_PATCH(self): self._respond()
+              def do_DELETE(self): self._respond()
+              def _respond(self):
+                  body = json.dumps({"status": "ok", "path": self.path, "method": self.command}).encode()
+                  self.send_response(200)
+                  self.send_header("Content-Type", "application/json")
+                  self.send_header("Content-Length", str(len(body)))
+                  self.end_headers()
+                  self.wfile.write(body)
+              def log_message(self, fmt, *args): pass
+
+          print("Mock backend listening on :9000", flush=True)
+          HTTPServer(("0.0.0.0", 9000), Handler).serve_forever()
+    ports:
+      - "9000:9000"
+    networks:
+      - sentinel_net
+
+  otterscan:
+    image: otterscan/otterscan:latest
+    environment:
+      ERIGON_URL: "http://localhost:8545" # because is used by the ui
+    ports:
+      - "5100:80"
+    networks:
+      - sentinel_net
+    depends_on:
+      hardhat:
+        condition: service_healthy
+
+  governance:
+    build:
+      context: ./services/governance
+      dockerfile: Dockerfile
+    environment:
+      BLOCKCHAIN_RPC_URL: http://hardhat:8545
+      CONTRACT_ISSUER_REGISTRY: ${CONTRACT_ISSUER_REGISTRY:-}
+      CONTRACT_TRUST_POLICY_REGISTRY: ${CONTRACT_TRUST_POLICY_REGISTRY:-}
+      CONTRACT_STATUS_REGISTRY: ${CONTRACT_STATUS_REGISTRY:-}
+      CONTRACT_SERVICE_REGISTRY: ${CONTRACT_SERVICE_REGISTRY:-}
+      GOVERNANCE_DB_PATH: /data/governance.db
+    ports:
+      - "8080:8080"
+    volumes:
+      - governance_data:/data
+    depends_on:
+      hardhat:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - sentinel_net
+
+volumes:
+  postgres_data:
+  redis_data:
+  hardhat_data:
+  sentinel_producer_data:
+  sentinel_consumer_data:
+  keycloak_data:
+  governance_data:
+
+networks:
+  sentinel_net:
+    name: sentinel_net

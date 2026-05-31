@@ -1,0 +1,31 @@
+@startuml c4-context
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Context.puml
+
+LAYOUT_WITH_LEGEND()
+
+title System Context — Sentinel Identity Platform [C4 Level 1]
+
+Person(op_a, "Admin — Entity A", "Registers services and Sentinels for Government Entity A")
+Person(op_b, "Admin — Entity B", "Registers services and Sentinels for Government Entity B")
+Person(end_user, "End User / Auditor", "Uses services; may trigger inter-entity data requests")
+
+System_Boundary(gov_a, "Government Entity A") {
+    System(consumer_service, "Consumer Service", "Business application that queries data from Entity B")
+}
+
+System_Boundary(gov_b, "Government Entity B") {
+    System(producer_service, "Producer Service", "Business application that exposes data APIs")
+}
+
+System(discovery, "Discovery Service", "Central DID registry, VC issuer, config orchestrator")
+System(blockchain, "Blockchain Trust Layer", "Immutable registry: SentinelRegistry, IssuerRegistry, TrustPolicyRegistry, StatusListAnchor")
+
+Rel(op_a, discovery, "Registers services and Sentinels", "HTTPS/mTLS")
+Rel(op_b, discovery, "Registers services and Sentinels", "HTTPS/mTLS")
+Rel(consumer_service, producer_service, "Queries data (via Sentinel proxies)", "HTTPS + SentinelProof")
+Rel(discovery, blockchain, "Anchors trust state (issuers, status hashes)", "JSON-RPC/TLS")
+Rel(producer_service, blockchain, "Reads issuer and policy state", "JSON-RPC/TLS")
+Rel(end_user, consumer_service, "Makes business requests", "HTTPS")
+
+SHOW_LEGEND()
+@enduml

@@ -1,0 +1,137 @@
+// Grafana Alloy configuration — log collection for Sentinel platform
+// Replaces Promtail (EOL March 2026)
+// Ref: https://grafana.com/docs/alloy/latest/
+
+// ── Kubernetes pod discovery ──────────────────────────────────────────────────
+discovery.kubernetes "sentinel_pods" {
+  role = "pod"
+
+  selectors {
+    role  = "pod"
+    label = "sentinel.io/log-collection=enabled"
+  }
+}
+
+// ── Relabel: map pod metadata to Alloy targets ────────────────────────────────
+discovery.relabel "sentinel_pods" {
+  targets = discovery.kubernetes.sentinel_pods.targets
+
+  // Keep only running containers
+  rule {
+    source_labels = ["__meta_kubernetes_pod_phase"]
+    regex         = "Running"
+    action        = "keep"
+  }
+
+  // Extract service_id label from pod annotation
+  rule {
+    source_labels = ["__meta_kubernetes_pod_annotation_sentinel_io_service_id"]
+    target_label  = "service_id"
+  }
+
+  // Extract env label
+  rule {
+    source_labels = ["__meta_kubernetes_pod_label_env"]
+    target_label  = "env"
+    replacement   = "$1"
+  }
+
+  // Map to namespace/pod/container
+  rule {
+    source_labels = ["__meta_kubernetes_namespace"]
+    target_label  = "namespace"
+  }
+
+  rule {
+    source_labels = ["__meta_kubernetes_pod_name"]
+    target_label  = "pod"
+  }
+
+  rule {
+    source_labels = ["__meta_kubernetes_pod_container_name"]
+    target_label  = "container"
+  }
+
+  // Set the log path
+  rule {
+    source_labels = [
+      "__meta_kubernetes_pod_uid",
+      "__meta_kubernetes_pod_container_name",
+    ]
+    separator     = "/"
+    target_label  = "__path__"
+    replacement   = "/var/log/pods/*$1/*.log"
+  }
+}
+
+// ── Tail pod logs ─────────────────────────────────────────────────────────────
+loki.source.kubernetes_logs "sentinel_pods" {
+  targets    = discovery.relabel.sentinel_pods.output
+  forward_to = [loki.process.sentinel_logs.receiver]
+}
+
+// ── Process and filter log lines ─────────────────────────────────────────────
+loki.process "sentinel_logs" {
+  // Stage 1: Parse JSON log lines
+  stage.json {
+    expressions = {
+      level      = "level",
+      event      = "event",
+      decision   = "decision",
+      service_id = "service_id",
+      trace_id   = "trace_id",
+    }
+  }
+
+  // Stage 2: Extract labels from JSON fields
+  stage.labels {
+    values = {
+      level      = "",
+      event      = "",
+      decision   = "",
+      service_id = "",
+    }
+  }
+
+  // Stage 3: Drop sensitive fields — never log raw payloads or tokens
+  stage.drop {
+    expression = "\"jti\""
+    drop_counter_reason = "security_redaction"
+  }
+
+  stage.drop {
+    expression = "\"proof\""
+    drop_counter_reason = "security_redaction"
+  }
+
+  // Stage 4: Drop trace_id as label (high cardinality — use LogQL filter instead)
+  stage.label_drop {
+    values = ["trace_id"]
+  }
+
+  // Stage 5: Limit log output rate to prevent Loki ingestion saturation
+  stage.limit {
+    rate            = 10000  // lines/s
+    burst           = 20000
+    drop            = true
+  }
+
+  forward_to = [loki.write.default.receiver]
+}
+
+// ── Loki write exporter ───────────────────────────────────────────────────────
+loki.write "default" {
+  endpoint {
+    url = env("LOKI_URL")
+
+    // Basic auth (overridden by env in prod)
+    basic_auth {
+      username = env("LOKI_USERNAME")
+      password = env("LOKI_PASSWORD")
+    }
+  }
+
+  external_labels = {
+    cluster = env("CLUSTER_NAME"),
+  }
+}

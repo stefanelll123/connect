@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sentinel UI — {{ title }}</title>
+<link rel="stylesheet" href="/ui/static/style.css">
+</head>
+<body>
+<nav>
+  <span class="brand">Sentinel UI</span>
+  <a href="/ui/enrollment">Enrollment</a>
+  <a href="/ui/did">DID</a>
+  <a href="/ui/credentials">Credentials</a>
+  <a href="/ui/health">Health</a>
+  <a href="/ui/logs">Logs</a>
+</nav>
+<main>
+{% block content %}{% endblock %}
+</main>
+<footer>Sentinel UI — internal only. Do not expose to public networks.</footer>
+</body>
+</html>

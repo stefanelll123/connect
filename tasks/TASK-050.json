@@ -1,0 +1,93 @@
+{
+  "id": "TASK-050",
+  "title": "Sentinel: Replay Cache, Nonce Handling, and Clock Skew Defense",
+  "component": "sentinel/libs/common/anti_replay",
+  "status": "pending",
+  "description": "Implement the complete replay protection and time validation subsystem. This covers: (1) the per-producer-sentinel Redis-backed replay cache for jti deduplication, (2) the onboarding nonce store for PoP challenges, (3) configurable clock skew enforcement using maxClockSkewSeconds from TrustPolicyRegistry, and (4) Prometheus alert metric for skew violations. The replay cache is a foundational security component that prevents valid-but-replayed requests from being processed twice. All components must be atomic and handle Redis unavailability gracefully.",
+  "objectives": [
+    "Implement ReplayCache for jti deduplication (Redis primary, in-memory LRU fallback)",
+    "Implement NonceStore for onboarding PoP challenges (one-time use, TTL 120s)",
+    "Clock skew validation using maxClockSkewSeconds from TrustPolicyRegistry (not hardcoded)",
+    "Expose CLOCK_SKEW alert metric and log on every skew violation",
+    "Atomic check-and-insert via Redis SET NX EX for all jti/nonce operations",
+    "In-memory LRU fallback must enforce TTL without Redis — no unbounded growth"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      {
+        "step": 1,
+        "title": "Implement Redis-backed ReplayCache",
+        "detail": "Class `ReplayCache` in `libs/common/anti_replay/replay_cache.py`. Constructor: `__init__(redis_client: aioredis.Redis, fallback: MemoryLRUCache)`. Primary method: `async check_and_insert(jti: str, iss: str, aud: str, ttl_seconds: int) -> bool`. Key computation: `key = 'replay:' + hashlib.sha256(f'{jti}|{iss}|{aud}'.encode()).hexdigest()`. Command: `SET key '1' NX EX ttl_seconds`. Returns True (jti is new, inserted) or False (jti already exists, replay). MUST use atomic NX to prevent TOCTOU race condition. If Redis command raises exception: fall through to in-memory fallback, log WARNING with `event=replay_cache_redis_fallback`."
+      },
+      {
+        "step": 2,
+        "title": "Implement in-memory LRU fallback",
+        "detail": "Class `MemoryLRUCache` using `collections.OrderedDict`. Constructor: `__init__(max_entries: int = 50000)`. Method `set_nx_ex(key: str, ttl_seconds: int) -> bool`: insert key if not present, return True if inserted. Evict LRU entry when at capacity before inserting (pop last item from OrderedDict). TTL enforcement: store `(inserted_at, ttl_seconds)` as value. On read: check `time.time() - entry.inserted_at < ttl_seconds` — if expired, remove and treat as not present (allowing insert). Method `cleanup_expired()`: called on every 1000th insert to batch-evict expired entries. WARNING: in-memory fallback does NOT survive sentinel restart — this is acceptable because proof JWTs expire within 60s (max exp-iat) and attacker window is bounded."
+      },
+      {
+        "step": 3,
+        "title": "Implement NonceStore for PoP challenges",
+        "detail": "Class `NonceStore` in `libs/common/anti_replay/nonce_store.py`. Used by Discovery for onboarding challenges (TASK-026) and by sentinel for session-level nonces (optional). Methods: `async generate(context_id: str, ttl_seconds: int = 120) -> str`: generate cryptographically random nonce (`secrets.token_urlsafe(32)`), store in Redis `SET nonce:{context_id} {nonce} NX EX {ttl}`. Returns nonce. `async consume(context_id: str, provided_nonce: str) -> bool`: `GET nonce:{context_id}`, compare with constant-time `hmac.compare_digest`, `DEL nonce:{context_id}`. Returns True if match + deleted. Returns False if not found or mismatch. Atomic: use Redis Lua script for GET+DEL to prevent race between check and delete."
+      },
+      {
+        "step": 4,
+        "title": "Implement clock skew validation",
+        "detail": "Function `validate_temporal_claims(iat: float, exp: float, max_clock_skew_seconds: int, now: float | None = None) -> None` in `libs/common/anti_replay/clock_skew.py`. Logic: `now = now or time.time()`. Check `iat <= now + max_clock_skew_seconds` (allow slight future iat within skew window). Check `exp > now - max_clock_skew_seconds` (token is not expired, allowing for backward skew). If `iat > now + max_clock_skew_seconds`: raise `ClockSkewError(code='CLOCK_SKEW_EXCEEDED', skew_seconds=iat-now)`. If `exp <= now - max_clock_skew_seconds`: raise `ClockSkewError(code='PROOF_EXPIRED', skew_seconds=now-exp)`. IMPORTANT: `max_clock_skew_seconds` MUST be fetched from `TrustLayerClient.get_policy_params().max_clock_skew_seconds` at call time — never hardcoded."
+      },
+      {
+        "step": 5,
+        "title": "Wire max_clock_skew from TrustPolicyRegistry",
+        "detail": "In `ProofVerifier.verify()` (TASK-043) and `InboundPipeline` (TASK-045): fetch policy params via `trust_client.get_policy_params()` before calling `validate_temporal_claims`. This ensures the skew window is governance-controlled via the blockchain. Default used only if policy params cannot be fetched AND OUTAGE_POLICY=degrade: `DEFAULT_CLOCK_SKEW_SECONDS=30` (conservative). If OUTAGE_POLICY=fail_closed and policy params unavailable: reject request with `TRUST_LAYER_UNAVAILABLE`. Log each clock skew violation: `event=clock_skew_violation skew_seconds={n} jti={jti[:8]}... decided=reject`."
+      },
+      {
+        "step": 6,
+        "title": "Prometheus metrics for replay and skew",
+        "detail": "Metrics: `replay_cache_inserts_total` Counter (new jti accepted), `replay_cache_rejects_total` Counter (duplicate jti), `replay_cache_redis_fallback_total` Counter (Redis unavailable, fallback used), `clock_skew_violations_total{direction: future|past}` Counter (iat in future or exp in past), `nonce_consumed_total{result: match|mismatch|expired}` Counter. For clock_skew_violations_total: define Prometheus alert rule `ClockSkewViolationSpike: rate(clock_skew_violations_total[5m]) > 5/5m` — this may indicate NTP misconfiguration or active attack."
+      },
+      {
+        "step": 7,
+        "title": "Redis key prefix namespacing",
+        "detail": "All Redis keys must be prefixed with `{service_id}:{env}:` to support multi-tenant Redis: `replay:{service_id}:{env}:{sha256_hash}`. This ensures replay caches from different sentinels sharing a Redis instance do not collide. Service_id and env injected at `ReplayCache` construction time from config. NonceStore uses prefix `nonce:{service_id}:`. All Redis operations use the same connection pool from sentinel app state (TASK-037)."
+      },
+      {
+        "step": 8,
+        "title": "Tests",
+        "detail": "Test file: `tests/unit/anti_replay/test_replay.py`. Cases: (1) first insert returns True; (2) duplicate insert returns False; (3) expired entry after TTL returns True (treated as new); (4) LRU fallback behaves identically to Redis version — same assert; (5) Redis failure triggers fallback, not exception propagation; (6) NonceStore generate+consume round-trip succeeds; (7) NonceStore replay of same nonce returns False (nonce consumed); (8) clock skew exactly at limit accepted; (9) clock skew one second over limit rejected; (10) expired proof rejected with PROOF_EXPIRED not CLOCK_SKEW_EXCEEDED. Use `fakeredis.aioredis` for Redis mocking."
+      }
+    ]
+  },
+  "project_structure": {
+    "files": {
+      "libs/common/anti_replay/__init__.py": "Exports ReplayCache, NonceStore, validate_temporal_claims, ClockSkewError",
+      "libs/common/anti_replay/replay_cache.py": "ReplayCache with Redis + MemoryLRU fallback",
+      "libs/common/anti_replay/memory_lru.py": "MemoryLRUCache with TTL enforcement",
+      "libs/common/anti_replay/nonce_store.py": "NonceStore with atomic Redis Lua GET+DEL",
+      "libs/common/anti_replay/clock_skew.py": "validate_temporal_claims, ClockSkewError",
+      "libs/common/anti_replay/metrics.py": "Prometheus metric definitions",
+      "tests/unit/anti_replay/test_replay.py": "10 test cases"
+    }
+  },
+  "data_structures": {
+    "redis_key_patterns": {
+      "replay_cache": "replay:{service_id}:{env}:{sha256(jti|iss|aud)[:16]}",
+      "nonce_store": "nonce:{service_id}:{context_id}",
+      "replay_ttl": "exp - iat + max_clock_skew_seconds (minimum 60s, maximum 3600s)"
+    }
+  },
+  "security_constraints": [
+    "Replay cache key MUST include iss and aud in the hash — prevents cross-tenant jti reuse between different producer/consumer pairs",
+    "Atomic NX is mandatory — no separate GET + SET pattern (TOCTOU race would allow replay)",
+    "NonceStore consume must be atomic (GET+compare+DEL) to prevent timing attack where slow consumer uses nonce twice",
+    "max_clock_skew MUST come from governance — self-configuring a large skew window would allow replay of expired proofs",
+    "In-memory fallback cleared on restart — this is intentional; do not persist replay cache to disk (risk of state desync)"
+  ],
+  "dependencies": ["TASK-043", "TASK-015", "TASK-035"],
+  "acceptance_criteria": [
+    "Same jti rejected on second attempt (Redis and in-memory fallback both tested)",
+    "Expired entry (past TTL) treated as new jti — correct re-insert allowed",
+    "Redis failure triggers in-memory fallback without propagating exception",
+    "Clock skew exactly at policy limit accepted; one second over rejected",
+    "NonceStore one-time consumption enforced atomically",
+    "Clock skew violations increment Prometheus counter on every occurrence"
+  ]
+}

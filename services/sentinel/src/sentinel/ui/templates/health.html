@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+<meta http-equiv="refresh" content="30">
+{% block content %}
+<h1>Health Dashboard</h1>
+<div class="card">
+  <dl>
+    <dt>Instance ID</dt><dd>{{ instance_id }}</dd>
+    <dt>Sentinel DID (hash)</dt><dd>{{ sentinel_did_hash }}</dd>
+    <dt>Uptime</dt><dd>{{ uptime_seconds }}s</dd>
+    <dt>Credential Count</dt><dd>{{ credential_count }}</dd>
+  </dl>
+</div>
+<div class="card">
+  <h2>Trust Layer</h2>
+  <dl>
+    <dt>Status</dt>
+    <dd>
+      {% if trust_layer_status == 'ok' %}<span class="status-ok">&#10003; OK</span>
+      {% elif trust_layer_status == 'stale' %}<span class="status-stale">&#9728; Stale</span>
+      {% else %}<span class="status-unavailable">&#10007; Unavailable</span>{% endif %}
+    </dd>
+    <dt>Config Bundle Version</dt><dd>{{ config_bundle_version }}</dd>
+    <dt>Config Bundle Age</dt>
+    <dd>{% if config_bundle_age_seconds is not none %}
+      {% if config_bundle_age_seconds > 3600 %}<span class="status-stale">{{ config_bundle_age_seconds }}s</span>
+      {% else %}<span class="status-ok">{{ config_bundle_age_seconds }}s</span>{% endif %}
+    {% else %}—{% endif %}</dd>
+    <dt>Last Credential Sync</dt><dd>{{ last_credential_sync_at or '—' }}</dd>
+    <dt>Chain Cache Age</dt><dd>{{ chain_cache_age_seconds }}s</dd>
+    <dt>Revocation Staleness</dt>
+    <dd>{% if revocation_staleness_seconds > revocation_delta_seconds %}
+      <span class="status-unavailable">{{ revocation_staleness_seconds }}s (STALE)</span>
+    {% elif revocation_staleness_seconds > revocation_delta_seconds // 2 %}
+      <span class="status-stale">{{ revocation_staleness_seconds }}s</span>
+    {% else %}
+      <span class="status-ok">{{ revocation_staleness_seconds }}s</span>
+    {% endif %}</dd>
+  </dl>
+</div>
+<div class="card">
+  <h2>Policy</h2>
+  <dl>
+    <dt>Policy Version</dt><dd>{{ policy_version }}</dd>
+    <dt>Rule Count</dt><dd>{{ policy_rule_count }}</dd>
+  </dl>
+</div>
+{% endblock %}

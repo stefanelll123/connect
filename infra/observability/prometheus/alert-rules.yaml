@@ -1,0 +1,144 @@
+groups:
+  # ── 1. Issuer Trust ───────────────────────────────────────────────────────
+  - name: issuer_trust
+    rules:
+      - alert: IssuerDisabledOnChain
+        expr: |
+          sum(increase(sentinel_chain_issuer_disabled_total[5m])) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Issuer disabled on-chain"
+          description: |
+            An issuer has been disabled on the blockchain registry.
+            All VCs issued by this issuer will be rejected immediately.
+            Service: {{ $labels.service_id }}, Env: {{ $labels.env }}
+          runbook_url: "https://docs.example.com/runbooks/incident-issuer-compromise"
+
+      - alert: IssuerRegistryUnreachable
+        expr: |
+          up{job="discovery"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Discovery service unreachable"
+          description: "Cannot reach Discovery service to verify issuer status."
+          runbook_url: "https://docs.example.com/runbooks/incident-discovery-compromise"
+
+  # ── 2. Revocation / Status List Staleness ────────────────────────────────
+  - name: revocation_staleness
+    rules:
+      - alert: StatusListStale
+        expr: |
+          sentinel_status_list_age_seconds
+          > sentinel_status_list_delta_threshold_seconds * 1.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Status list is stale (>1.1× delta threshold)"
+          description: |
+            Status list for issuer {{ $labels.issuer_did }} is {{ $value | humanizeDuration }} old.
+            The configured delta threshold is {{ $labels.delta_threshold }}.
+          runbook_url: "https://docs.example.com/runbooks/recovery-checklist"
+
+      - alert: StatusListStaleCritical
+        expr: |
+          sentinel_status_list_age_seconds
+          > sentinel_status_list_delta_threshold_seconds * 2
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Status list critically stale (>2× delta threshold)"
+          description: |
+            Status list for issuer {{ $labels.issuer_did }} is {{ $value | humanizeDuration }} old.
+            Sentinels may be accepting revoked credentials.
+          runbook_url: "https://docs.example.com/runbooks/incident-credential-leakage"
+
+  # ── 3. Replay Attack Detection ────────────────────────────────────────────
+  - name: replay_attacks
+    rules:
+      - alert: ReplayRejectionSpike
+        expr: |
+          rate(sentinel_replay_rejects_total[5m]) > 5
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Elevated replay rejection rate"
+          description: |
+            Sentinel {{ $labels.service_id }} is rejecting {{ $value | humanize }} replays/s.
+            This may indicate a replay attack or misconfigured client.
+          runbook_url: "https://docs.example.com/runbooks/incident-credential-leakage"
+
+      - alert: ReplayRejectionSpikeCritical
+        expr: |
+          rate(sentinel_replay_rejects_total[5m]) > 20
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical replay rejection spike — possible DDoS"
+          description: |
+            Sentinel {{ $labels.service_id }} rejecting {{ $value | humanize }} replays/s.
+            Potential DDoS or credential leakage. Immediate investigation required.
+          runbook_url: "https://docs.example.com/runbooks/incident-credential-leakage"
+
+  # ── 4. Chain Indexer Lag ──────────────────────────────────────────────────
+  - name: chain_indexer
+    rules:
+      - alert: ChainIndexerLag
+        expr: |
+          sentinel_chain_indexer_lag_blocks > 50
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Chain indexer lagging behind"
+          description: |
+            Chain indexer is {{ $value }} blocks behind chain head.
+            On-chain events (issuer disable, policy updates) may not be processed.
+          runbook_url: "https://docs.example.com/runbooks/incident-chain-outage"
+
+      - alert: ChainIndexerLagCritical
+        expr: |
+          sentinel_chain_indexer_lag_blocks > 200
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Chain indexer critically behind — trust enforcement degraded"
+          description: |
+            Chain indexer is {{ $value }} blocks behind. On-chain revocations and
+            issuer disables may not be enforced. Fail-closed may be triggered.
+          runbook_url: "https://docs.example.com/runbooks/incident-chain-outage"
+
+  # ── 5. Onboarding Failures ────────────────────────────────────────────────
+  - name: onboarding
+    rules:
+      - alert: OnboardingFailureSpike
+        expr: |
+          rate(discovery_enrollment_failures_total[10m]) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Elevated onboarding failure rate"
+          description: |
+            {{ $value | humanize }} enrollment failures/s in the last 10 minutes.
+            Could indicate chain congestion, Vault unavailability, or registration spam.
+          runbook_url: "https://docs.example.com/runbooks/recovery-checklist"
+
+  # ── Dead man's switch ─────────────────────────────────────────────────────
+  - name: watchdog
+    rules:
+      - alert: SentinelWatchdog
+        expr: vector(1)
+        labels:
+          severity: none
+        annotations:
+          summary: "Watchdog — monitoring is alive"
+          description: "This alert always fires. If it stops, monitoring is down."

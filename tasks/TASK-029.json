@@ -1,0 +1,103 @@
+{
+  "id": "TASK-029",
+  "title": "Discovery Service: Credential Distribution and Rotation (Pull Model) for Sentinels",
+  "component": "discovery-service",
+  "status": "not-started",
+  "description": "Implement the endpoints and logic for sentinels to download their active credentials, retrieve incremental updates since a timestamp, and manage rotation with a grace period (both old and new credential accepted simultaneously). Distribution is scoped strictly per sentinel — only credentials belonging to the authenticated sentinel are returned. Rotated credentials pass through a deprecated_until window before the old credential becomes invalid.",
+  "objectives": [
+    "Secure, scoped credential delivery — a sentinel only receives its own credentials",
+    "Incremental sync (since parameter + ETag/If-Modified-Since) to minimize bandwidth for polling sentinels",
+    "Rotation grace period: overlapping credential validity allows zero-downtime key/credential turnover"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      "Step 1 - Sentinel Credential Feed Endpoint: GET /api/v1/sentinels/{sentinel_id}/credentials. Auth: sentinel bearer token (issued at onboarding) OR security-admin. Query params: since=<ISO-8601 timestamp> (optional, for incremental sync), type=<credential_type> (optional filter), status=active|deprecated (default: active,deprecated combined). Returns list of VC metadata + JWT blobs for credentials that belong to this sentinel's DID + env + service_id.",
+      "Step 2 - Scoping Filter (Security-Critical): The SQL query MUST filter by subject_did = sentinel_record.did AND env = sentinel_record.env AND service_id = sentinel_record.service_id. Never return credentials from a different env or service to a calling sentinel. Verify that the requesting sentinel's bearer token subject matches the sentinel_id in the URL. Mismatches → 403 FORBIDDEN.",
+      "Step 3 - Incremental Sync: If since parameter is provided, return only credentials where issued_at > since OR (status='deprecated' AND deprecated_until > since). This allows sentinels to poll every N minutes and receive only changed/new records. If no since is provided, return full active set.",
+      "Step 4 - ETag / If-Modified-Since Caching: Compute a feed ETag as SHA-256(sorted jti list of returned credentials). Return ETag header. If client sends If-None-Match and it matches → return 304. Also support If-Modified-Since: last_credential_issued_at. Reduces load for polling sentinels with no changes.",
+      "Step 5 - Response Schema: { credentials: [ { credential_id, jti, credential_type, subject_did, expires_at, status, deprecated_until (nullable), jwt_vc } ], fetched_at, next_poll_after (ISO-8601, hint for sentinel polling interval) }. jwt_vc is the full signed JWT string. If encrypted_payload is stored → decrypt with SecretStorage and return plaintext JWT to authenticated sentinel.",
+      "Step 6 - Rotation Support: When a new VC is issued to replace an existing one (via reissue_on_rotation in TASK-028): (a) old credential status stays 'active' → changes to 'deprecated', (b) deprecated_until = now() + ROTATION_GRACE_PERIOD (default 300 seconds, configurable). During grace period, feed returns both old (deprecated) and new (active) credentials. After deprecated_until, sweeper changes old status to 'expired'. Sentinels must accept both during grace period.",
+      "Step 7 - Rotation Grace Period Sweeper: Background task (runs every 60 seconds). SELECT * FROM credentials WHERE status='deprecated' AND deprecated_until < now(). Batch update status='expired'. Log count. No audit event per credential (bulk logged at system level).",
+      "Step 8 - Admin Trigger Rotation Endpoint: POST /api/v1/sentinels/{sentinel_id}/credentials/{credential_id}/rotate. Auth: security-admin. Body: { new_expires_in_days (optional, defaults to original TTL) }. Calls CredentialIssuerService.reissue_on_rotation(credential_id). Sets deprecated_until on old record. Returns new credential metadata. Writes audit event: action='credential_rotated', actor, old_jti, new_jti.",
+      "Step 9 - Forced Full Sync: GET /api/v1/sentinels/{sentinel_id}/credentials/sync-full ignores ETag and since, always returns the full active+deprecated set. Used after sentinel recovery from outage or credential store corruption. Requires sentinel bearer token. Rate limited: max 10 full syncs per sentinel per hour.",
+      "Step 10 - Delivery Receipts (Optional): If CREDENTIAL_DELIVERY_RECEIPTS=true in settings: after sentinel fetches credentials, a background task records delivery: update credentials table feedback column delivered_at=now() per jti. Used for operational visibility (admin can see if a sentinel has fetched its latest credentials). Does not affect authorization logic.",
+      "Step 11 - Sentinel Authentication for Credential Fetch: The sentinel must authenticate using the bearer token embedded in the onboarding bundle (a short-lived JWT issued by Discovery at onboarding + a DID-signed request header). Token TTL: 24h, renewable via POST /api/v1/sentinels/{sentinel_id}/auth/renew (DID PoP required). This ensures that even if a sentinel token leaks, it expires within 24h."
+    ],
+    "project_structure": {
+      "files": {
+        "services/discovery/src/discovery/api/v1/routers/sentinel_credentials.py": "Credential feed, rotate, sync-full endpoints",
+        "services/discovery/src/discovery/services/credential_distribution.py": "Feed query, scoping, ETag, rotation logic",
+        "services/discovery/src/discovery/tasks/rotation_sweeper.py": "Background task for deprecated → expired transition",
+        "services/discovery/src/discovery/schemas/credential_feed.py": "Pydantic response schemas for credential feed"
+      }
+    },
+    "api_endpoints": [
+      {
+        "method": "GET",
+        "path": "/api/v1/sentinels/{sentinel_id}/credentials",
+        "auth": "sentinel bearer token OR security-admin",
+        "query_params": {
+          "since": "2024-01-15T09:00:00Z (optional)",
+          "type": "SentinelIdentityCredential (optional)",
+          "status": "active (optional, default: active+deprecated)"
+        },
+        "response_200": {
+          "credentials": [
+            {
+              "credential_id": "uuid",
+              "jti": "urn:uuid:a1b2c3d4-...",
+              "credential_type": "SentinelIdentityCredential",
+              "subject_did": "did:key:z6Mk...",
+              "expires_at": "2024-04-15T10:00:00Z",
+              "status": "active",
+              "deprecated_until": null,
+              "jwt_vc": "eyJhbGci..."
+            }
+          ],
+          "fetched_at": "2024-01-15T10:00:00Z",
+          "next_poll_after": "2024-01-15T10:05:00Z"
+        },
+        "response_304": "Not Modified (no changes since last ETag)"
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/sentinels/{sentinel_id}/credentials/{credential_id}/rotate",
+        "auth": "security-admin",
+        "request": { "new_expires_in_days": 30 },
+        "response_201": {
+          "old_credential_id": "uuid-old",
+          "old_jti": "urn:uuid:old",
+          "old_status": "deprecated",
+          "deprecated_until": "2024-01-15T10:05:00Z",
+          "new_credential_id": "uuid-new",
+          "new_jti": "urn:uuid:new",
+          "new_jwt_vc": "eyJhbGci...",
+          "new_expires_at": "2024-02-15T10:00:00Z"
+        }
+      }
+    ],
+    "error_handling": [
+      { "condition": "Requesting sentinel ID does not match token subject", "status": 403, "code": "SCOPE_VIOLATION", "message": "You are not authorized to access credentials for sentinel with this ID" },
+      { "condition": "credential_id does not belong to sentinel_id", "status": 404, "code": "CREDENTIAL_NOT_FOUND", "message": "Credential not found or does not belong to this sentinel" },
+      { "condition": "Full sync rate limit exceeded", "status": 429, "code": "FULL_SYNC_RATE_LIMIT", "message": "Maximum full syncs (10/hour) exceeded. Use incremental sync with 'since' parameter." },
+      { "condition": "Credential already in rotation (deprecated status)", "status": 409, "code": "ALREADY_IN_ROTATION", "message": "Credential is already being rotated. Wait for deprecated_until to expire." }
+    ],
+    "security_constraints": [
+      "Strict subject_did + env + service_id scoping on all DB queries — cross-sentinel credential access impossible at query level",
+      "Sentinel bearer token validated on every request — expired tokens rejected without fallback",
+      "JWT-VC payload returned to sentinel delivered only over TLS — no plaintext on wire",
+      "Audit event written for every credential fetch: actor=sentinel_did, action='credentials_fetched', count=N",
+      "deprecated_until grace period: configurable per environment — shorter in prod (default 300s), longer in dev (default 1800s)",
+      "Encrypted credentials in DB: decrypted only in-process, never logged"
+    ]
+  },
+  "dependencies": ["TASK-028", "TASK-027"],
+  "acceptance_criteria": [
+    "GET /credentials with a sentinel token for sentinel A never returns credentials for sentinel B",
+    "Incremental sync with since parameter returns only credentials issued after that time",
+    "Second GET with same ETag returns 304",
+    "Rotation creates new credential with new jti, marks old as deprecated with deprecated_until",
+    "Rotation sweeper transitions deprecated credential to expired after deprecated_until passes (integration test)",
+    "Full sync endpoint respects 10/hour rate limit per sentinel"
+  ]
+}

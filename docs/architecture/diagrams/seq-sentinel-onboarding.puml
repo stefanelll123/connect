@@ -1,0 +1,52 @@
+@startuml seq-sentinel-onboarding
+title Sentinel Onboarding Flow
+
+actor "Admin (Entity A)" as admin
+participant "Discovery API" as disc
+participant "Discovery DB" as db
+participant "Vault (Discovery)" as vault_disc
+participant "Consumer Sentinel" as sentinel
+participant "Vault (Consumer)" as vault_sen
+participant "SentinelRegistry\n(Blockchain)" as chain
+
+== Step 1: Admin requests enrollment token ==
+
+admin -> disc: POST /api/v1/sentinels/enrollment-tokens\n{\n  "service_id": "consumer-app",\n  "env": "prod",\n  "role": "CONSUMER"\n}\nAuthorization: Bearer <admin-api-key>
+disc -> disc: Generate UUID enrollment token
+disc -> vault_disc: kv/write secret/tokens/<token_id>\n{ token, service_id, env, role, expires_at }
+vault_disc --> disc: ok
+disc -> db: INSERT enrollment_tokens\n{ token_hash, service_id, env, role, one_time_use=true }
+disc --> admin: 201 Created\n{\n  "enrollment_token": "<opaque-jwt>",\n  "expires_at": "ISO8601",\n  "one_time_use": true\n}
+
+== Step 2: Sentinel starts and enrolls ==
+
+sentinel -> vault_sen: Read private key\nsecret/sentinel/prod/consumer-app/private_key
+alt Private key not found
+    vault_sen --> sentinel: 404 Not Found
+    sentinel -> sentinel: generate_did_key()\n→ (private_key_bytes, did)
+    sentinel -> vault_sen: kv/write private_key_bytes
+    vault_sen --> sentinel: ok
+else Key found
+    vault_sen --> sentinel: private_key_bytes
+    sentinel -> sentinel: derive did from public key
+end
+
+sentinel -> disc: POST /api/v1/sentinels/enroll\n{\n  "did": "did:key:z6Mk...",\n  "public_key_jwk": {...},\n  "service_id": "consumer-app",\n  "env": "prod"\n}\nAuthorization: Bearer <enrollment-token>
+disc -> vault_disc: Read and validate enrollment token
+vault_disc --> disc: { token, service_id, env, used=false }
+disc -> disc: Verify token not expired\nVerify token.service_id matches payload
+disc -> chain: sentinelRegistry.register\n(did, service_id, env, pubkey_hash)
+chain --> disc: txHash
+
+disc -> db: UPDATE enrollment_tokens SET used=true
+disc -> db: INSERT sentinels\n{ did, service_id, env, status=ACTIVE, pubkey_jwk }
+disc -> db: INSERT audit_log\n{ action=SENTINEL_ENROLLED, did, service_id }
+disc --> sentinel: 200 OK\n{\n  "did": "did:key:z6Mk...",\n  "status": "ACTIVE",\n  "config_endpoint": "/api/v1/config"\n}
+
+== Step 3: Replay prevention — token is now used ==
+
+admin -> disc: (attempt to reuse same token)
+disc -> db: SELECT * FROM enrollment_tokens WHERE token_hash=X
+disc --> admin: 401 Unauthorized\n{ "error": "ENROLLMENT_TOKEN_USED" }
+
+@enduml

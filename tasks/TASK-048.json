@@ -1,0 +1,93 @@
+{
+  "id": "TASK-048",
+  "title": "Sentinel: Multi-instance Support (shared identity, instance registration, endpoint deduplication, graceful shutdown)",
+  "component": "sentinel/multi_instance",
+  "status": "pending",
+  "description": "Implement correct multi-instance clustering for Sentinel: multiple instances sharing the same DID and credentials, each registering its own endpoint in the ServiceDescriptor, avoiding publish conflicts via deduplication logic, maintaining leaderless operation, and implementing graceful shutdown that marks an instance's endpoint as draining before stopping. The shared identity means all instances use the same DID key from Vault, the same credential set from Discovery, and coordinate descriptor publication without a master/leader.",
+  "objectives": [
+    "Generate per-instance UUID (instance_id) at startup, include in heartbeat and descriptor",
+    "All instances use the same DID key via Vault (TASK-038) and same credential sync (TASK-040)",
+    "Implement publisher deduplication: prevent multiple instances publishing conflicting descriptor versions simultaneously",
+    "Consumer endpoint selection supports weight and health status from multi-instance descriptor",
+    "Graceful shutdown: mark own endpoint as draining in descriptor update, drain in-flight requests, then stop",
+    "Heartbeat includes instance_id and endpoint URL for per-instance health tracking in Discovery"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      {
+        "step": 1,
+        "title": "Generate and persist instance_id",
+        "detail": "On startup in `sentinel/core/instance.py`: generate `instance_id = str(uuid4())` and store in `$SENTINEL_HOME/.sentinel/instance_id`. On subsequent restarts, read the file to preserve the same instance_id. This ensures consistent identity across restarts within the same deployment. If the file is missing (new deployment or migration), generate a new UUID. Include `instance_id` in all heartbeat payloads and descriptor endpoint entries."
+      },
+      {
+        "step": 2,
+        "title": "Shared DID key from Vault without divergence",
+        "detail": "In multi-instance mode (`SENTINEL_INSTANCES > 1` or `VAULT_MODE=true`), the DID private key MUST reside in HashiCorp Vault (TASK-038) at path `secret/sentinel/{service_id}/did_key`. All instances mount the same secret. No instance stores the key locally. The auto-renewal loop (TASK-038) runs in each instance independently (idempotent renewal — multiple renewals are safe given Vault lease idempotency). `DIDKeyManager.get_key()` fetches from Vault on each use (sub-millisecond with Vault agent caching). This guarantees all instances sign with the identical key — consumer validators only need to trust one DID."
+      },
+      {
+        "step": 3,
+        "title": "Credential synchronization across instances",
+        "detail": "Each instance runs its own `DiscoverySyncLoop` (TASK-040) independently. All instances pull credentials from Discovery using the shared sentinel DID as subject — they receive identical credential sets. Since credentials are read-only after issuance, no merge conflicts exist. The only state difference is each instance's `downloaded_at` timestamp in its local credential cache. RevocationManager (TASK-046) also runs independently per instance — Δ enforcement is per-instance but using the same governance parameter."
+      },
+      {
+        "step": 4,
+        "title": "Descriptor publication with deduplication",
+        "detail": "Problem: when N instances start simultaneously, all may call `POST /api/v1/services/{id}/descriptor` concurrently, causing conflicts. Solution: Use a Redis distributed lock (key: `sentinel_desc_lock:{service_id}:{env}`, TTL 30s) via `SET key instance_id NX EX 30`. Only the lock holder publishes the descriptor. After publishing, release lock. Other instances: if they cannot acquire lock within 5s, call `GET /api/v1/registry/resolve` to check if a recent descriptor (< 60s old) was already published — if so, skip publishing. All instances register their own endpoint in the descriptor's `endpoints` list: call `PATCH /api/v1/services/{id}/descriptor/endpoints` to add/update their own endpoint entry (new API in Discovery, see below). If Redis is unavailable: skip locking, publish directly, accept the last-write-wins behavior (Discovery handles idempotently)."
+      },
+      {
+        "step": 5,
+        "title": "Discovery API for endpoint management",
+        "detail": "Add to Discovery Service (extends TASK-032): `PATCH /api/v1/services/{service_id}/descriptor/endpoints` with body `{instance_id, endpoint_url, weight, health_status: 'active|draining|unhealthy', env}`. Requires sentinel mTLS auth. Creates or updates an endpoint entry in `service_descriptor_endpoints` table. GET /registry/resolve includes all active (non-draining, non-unhealthy removed after 60s) endpoints in response. This allows each instance to self-register and update its own endpoint state without overwriting the full descriptor."
+      },
+      {
+        "step": 6,
+        "title": "Consumer endpoint selection with health-aware load balancing",
+        "detail": "Consumer `EndpointSelector` (from TASK-044) receives descriptor with `endpoints: [{url, weight, health_status, instance_id}]`. Selection: filter `health_status == 'active'`. Apply weighted random selection. If endpoint returns 5xx: locally mark that specific URL as `circuit_open` for 30s (do NOT mark the entire service unavailable). Retry selects a different endpoint. This is pure client-side logic — no coordination needed."
+      },
+      {
+        "step": 7,
+        "title": "Graceful shutdown procedure",
+        "detail": "Register SIGTERM handler in `sentinel/core/shutdown.py`. On SIGTERM: (1) Immediately call `PATCH /api/v1/services/{id}/descriptor/endpoints` with `{instance_id, health_status: 'draining'}` — Discovery propagates this to consumers. (2) Stop accepting new `/outbound/` or inbound requests (return 503 to new requests). (3) Wait for in-flight requests to complete, up to `DRAIN_TIMEOUT_SECONDS=30`. (4) Call `PATCH` again with `health_status: 'offline'`. (5) Cleanly close HTTPX client, revoke Vault token (if Vault mode). (6) Exit with code 0. Kubernetes sends SIGTERM, waits `terminationGracePeriodSeconds=35` before SIGKILL."
+      },
+      {
+        "step": 8,
+        "title": "Tests",
+        "detail": "Tests in `tests/integration/multi_instance/`: (1) instance_id is created and persisted across restarts; (2) two instances start simultaneously — only one acquires lock and publishes, other joins via endpoint patch; (3) descriptor resolve returns both instances' endpoints; (4) instance marked draining is excluded from consumer endpoint selection; (5) instance shutdown sequence: draining → drain wait → offline; (6) credential sync produces identical VC sets on two instances. Use Docker Compose with two sentinel containers and shared Vault/Redis."
+      }
+    ]
+  },
+  "project_structure": {
+    "files": {
+      "sentinel/core/instance.py": "instance_id generation/persistence, startup registration",
+      "sentinel/core/shutdown.py": "SIGTERM handler, graceful drain procedure",
+      "sentinel/multi_instance/publisher_lock.py": "Redis-based descriptor publish lock",
+      "sentinel/multi_instance/endpoint_manager.py": "Self-registration and health_status update",
+      "discovery/api/v1/services/endpoints.py": "New PATCH endpoint for endpoint self-registration",
+      "tests/integration/multi_instance/": "Multi-instance integration tests"
+    }
+  },
+  "configuration": {
+    "env_vars": {
+      "SENTINEL_INSTANCE_ID_FILE": "$SENTINEL_HOME/.sentinel/instance_id",
+      "DRAIN_TIMEOUT_SECONDS": "30",
+      "DESCRIPTOR_PUBLISH_LOCK_TTL": "30 (Redis lock TTL in seconds)",
+      "DESCRIPTOR_PUBLISH_LOCK_WAIT": "5 (seconds to wait for lock)"
+    }
+  },
+  "security_constraints": [
+    "Shared DID key MUST be stored in Vault — never on local disk in multi-instance mode",
+    "Publisher lock must use Redis SET NX for atomic check-and-set — no WATCH/MULTI (race-prone in cluster)",
+    "Draining state transition must be published to Discovery BEFORE stopping to accept requests",
+    "Instance_id must be stable across restarts to maintain consistent identity in audit logs",
+    "No instance may overwrite another instance's endpoint entry — use instance_id as partition key"
+  ],
+  "dependencies": ["TASK-008", "TASK-032", "TASK-033", "TASK-038", "TASK-040"],
+  "acceptance_criteria": [
+    "instance_id is stable across restarts (read from file on restart)",
+    "Two simultaneous instances avoid descriptor publish conflict via lock",
+    "Both instances' endpoints appear in resolved descriptor",
+    "Draining instance is excluded from consumer endpoint selection",
+    "Graceful shutdown completes drain within 30s before exit",
+    "Health status transitions are reflected in Discovery within 10s"
+  ]
+}

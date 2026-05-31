@@ -1,0 +1,64 @@
+@startuml seq-key-rotation
+title Key and Credential Rotation Flow
+
+participant "Consumer Sentinel" as csent
+participant "Vault (Consumer)" as cvault
+participant "Discovery API" as disc
+participant "Discovery DB" as db
+participant "SentinelRegistry\n(Blockchain)" as chain
+
+note over csent
+  Rotation is triggered by:
+  (a) Scheduled key rotation policy (e.g., every 90 days)
+  (b) Imminent VC expiry (detected by background timer)
+  (c) Manual admin-initiated rotation
+  (d) Suspected key compromise
+end note
+
+== Phase 1: Generate new key pair ==
+
+csent -> csent: generate_did_key()\n→ new_private_key, new_did
+
+csent -> cvault: kv/write\nsecret/sentinel/prod/consumer-app/private_key_pending\n{ private_key_bytes: new_key }
+cvault --> csent: ok
+
+== Phase 2: Update DID registration ==
+
+csent -> disc: PATCH /api/v1/sentinels/did:key:z6Mk<OLD>\n{\n  "new_did": "did:key:z6Mk<NEW>",\n  "new_public_key_jwk": {...},\n  "rotation_proof": "<JWS signed by OLD key over {old_did, new_did, ts}>"\n}\nAuthorization: Bearer <session-token>
+
+disc -> disc: Verify rotation_proof with OLD public key\n(proves possession of old key)
+
+disc -> chain: sentinelRegistry.rotate\n(old_did, new_did, new_pubkey_hash)
+chain --> disc: txHash
+
+disc -> db: UPDATE sentinels\n  SET did=new_did, public_key=new_jwk,\n  old_did=old_did, rotation_tx=txHash
+
+disc -> db: INSERT audit_log\n{ action=SENTINEL_ROTATED, old_did, new_did, ts }
+
+disc --> csent: 200 OK\n{\n  "new_did": "did:key:z6Mk<NEW>",\n  "old_did_status": "GRACE_PERIOD",\n  "grace_period_ends": "ISO8601 + 5min"\n}
+
+== Phase 3: Sentinel switches to new key ==
+
+csent -> cvault: kv/write\nsecret/sentinel/prod/consumer-app/private_key\n{ private_key_bytes: new_key }
+cvault --> csent: ok
+
+csent -> cvault: kv/delete\nsecret/sentinel/prod/consumer-app/private_key_pending
+cvault --> csent: ok
+
+== Phase 4: Re-issue VC with new DID ==
+
+csent -> disc: POST /api/v1/credentials\n{\n  "consumer_did": "did:key:z6Mk<NEW>",\n  "producer_service_id": "citizen-data",\n  "env": "prod",\n  "scope": [...]\n}\nAuthorization: Bearer <new-session-token-signed-by-new-key>
+
+disc -> disc: Issue new VC (see seq-vc-issuance)
+disc --> csent: 201 Created { "credential": "<new-jwt-vc>" }
+
+csent -> csent: Replace stored VC\nBegin using new key + new VC
+
+note over disc
+  Grace period: during GRACE_PERIOD_SECONDS (default: 300s)
+  the old DID is still accepted by Producer Sentinels
+  that haven't refreshed their DID resolution cache yet.
+  After grace period, old DID is DEPRECATED on-chain.
+end note
+
+@enduml

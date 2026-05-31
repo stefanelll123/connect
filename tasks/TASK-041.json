@@ -1,0 +1,131 @@
+{
+  "id": "TASK-041",
+  "title": "Sentinel: VC/VP Engine Integration (verify_vc, verify_vp, create_vp, DID resolver)",
+  "component": "sentinel/libs/common/vc_engine",
+  "status": "pending",
+  "description": "Integrate a library capable of verifying JWT-VC and JWT-VP (W3C VC Data Model v2.0, VC-JOSE-COSE) and create wrapper functions in a shared library used by all sentinel components. The engine must resolve DIDs (did:key local derivation, optional did:ethr via chain), verify credential signatures, check expiry/nbf, validate VP audience binding and nonce, and report structured error codes.",
+  "objectives": [
+    "Implement verify_vc(vc_jwt, trusted_issuer_dids, now) returning VerifiedCredential or raising VCError",
+    "Implement verify_vp(vp_jwt, expected_aud, expected_nonce, expected_env, now) returning VerifiedPresentation or raising VPError",
+    "Implement create_vp(vcs, holder_did, holder_key, aud, nonce, env, exp_seconds) returning signed JWT-VP",
+    "Implement DIDResolver with did:key local derivation and optional did:ethr lookup via chain",
+    "Define structured error codes: VC_EXPIRED, VC_NBF, ISSUER_UNTRUSTED, STATUS_REVOKED, SIGNATURE_INVALID, VP_INVALID, VP_AUD_MISMATCH, VP_NONCE_MISMATCH, DID_UNRESOLVABLE, SCHEMA_MISMATCH",
+    "Write test suite with known-good and adversarial vectors covering all error paths"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      {
+        "step": 1,
+        "title": "Choose and install VC/VP library",
+        "detail": "Use PyJWT + cryptography for JWT parsing and signature verification. Install: `pip install PyJWT>=2.8 cryptography>=42`. For DID key material handling install `multiformats` or implement minimal multicodec prefix decoding manually (Ed25519: prefix 0xed01, base58btc multibase). Do NOT use DIDKit if it brings native binary dependencies that complicate cross-platform builds — verify tradeoffs first. If DIDKit is chosen, pin the wheel version and include in pyproject.toml extras."
+      },
+      {
+        "step": 2,
+        "title": "Create module layout",
+        "detail": "Create `libs/common/vc_engine/__init__.py` exporting: `verify_vc`, `verify_vp`, `create_vp`, `DIDResolver`, `VCError`, `VPError`, `VCErrorCode` enum. Sub-modules: `resolver.py` (DID resolution), `verifier.py` (VC/VP verification logic), `builder.py` (VP construction), `errors.py` (exception hierarchy)."
+      },
+      {
+        "step": 3,
+        "title": "Implement DIDResolver",
+        "detail": "Class DIDResolver with method `async resolve(did: str) -> DIDDocument`. For `did:key`: parse the multibase-encoded public key bytes from the method-specific-id. Ed25519 keys use multicodec prefix 0xed01. Reconstruct the JWK or raw public key bytes. Return a DIDDocument with `verificationMethod[0].publicKeyJwk`. For `did:ethr`: forward to optional ChainClient.get_did_document(did); if chain client not available, raise DID_UNRESOLVABLE. Cache resolved docs in an LRU cache (max 512 entries, TTL 300s). Example did:key: `did:key:z6Mk...` → base58btc decode → strip multicodec prefix → 32-byte Ed25519 public key."
+      },
+      {
+        "step": 4,
+        "title": "Implement verify_vc",
+        "detail": "Signature: `async def verify_vc(vc_jwt: str, trusted_issuer_dids: set[str], resolver: DIDResolver, now: float | None = None) -> VerifiedCredential`. Steps: (1) Decode JWT header without verification to get `kid` or `iss`. (2) Resolve issuer DID via resolver. (3) Verify JWT signature using resolved public key. (4) Validate `typ` header = `vc+jwt`. (5) Extract `vc` claim body. (6) Check `exp` > now (raise VC_EXPIRED). (7) Check `nbf` <= now if present (raise VC_NBF). (8) Check `iss` is in `trusted_issuer_dids` (raise ISSUER_UNTRUSTED). (9) Check `jti` is present (unique credential ID). (10) Return VerifiedCredential dataclass with fields: issuer_did, subject_did, credential_type, claims dict, exp, nbf, jti, raw_jwt."
+      },
+      {
+        "step": 5,
+        "title": "Implement verify_vp",
+        "detail": "Signature: `async def verify_vp(vp_jwt: str, expected_aud: str, expected_nonce: str | None, expected_env: str | None, resolver: DIDResolver, now: float | None = None) -> VerifiedPresentation`. Steps: (1) Decode and verify JWT. (2) Validate `typ` = `vp+jwt`. (3) Check `aud` matches expected_aud (raise VP_AUD_MISMATCH — constant-time compare). (4) If expected_nonce provided, check `nonce` matches (raise VP_NONCE_MISMATCH). (5) Extract `vp.verifiableCredential[]` list. (6) For each VC in the list call `verify_vc` with trusted_issuer_dids from context (pass through parameter). (7) Check `env` claim matches expected_env if provided. (8) Return VerifiedPresentation with: holder_did, presentation_id, vcs: list[VerifiedCredential], exp, raw_jwt."
+      },
+      {
+        "step": 6,
+        "title": "Implement create_vp",
+        "detail": "Signature: `def create_vp(vcs: list[str], holder_did: str, holder_key: Ed25519PrivateKey, aud: str, nonce: str, env: str, exp_seconds: int = 300) -> str`. Construct JWT payload: `{iss: holder_did, aud: aud, nonce: nonce, iat: now, exp: now+exp_seconds, jti: uuid4(), vp: {\"@context\": [...], type: [\"VerifiablePresentation\"], verifiableCredential: vcs}, env: env}`. Header: `{alg: \"EdDSA\", typ: \"vp+jwt\", kid: holder_did + \"#\" + method_fragment}`. Sign with Ed25519PrivateKey using PyJWT `jwt.encode`. Return compact JWS string."
+      },
+      {
+        "step": 7,
+        "title": "Define error hierarchy",
+        "detail": "In `errors.py`: `class VCError(Exception): code: VCErrorCode; detail: str`. `class VPError(Exception): code: VPErrorCode; detail: str`. Enum `VCErrorCode(str, Enum)`: VC_EXPIRED, VC_NBF, ISSUER_UNTRUSTED, STATUS_REVOKED, SIGNATURE_INVALID, DID_UNRESOLVABLE, SCHEMA_MISMATCH, PARSE_ERROR. Enum `VPErrorCode(str, Enum)`: VP_INVALID, VP_AUD_MISMATCH, VP_NONCE_MISMATCH, VP_EXPIRED, VC_ERROR (wraps inner VCError). Never include raw JWT bytes in error detail — only jti or truncated hash."
+      },
+      {
+        "step": 8,
+        "title": "Status revocation check integration",
+        "detail": "verify_vc does NOT directly perform revocation check because that requires async access to RevocationManager (TASK-046). Instead, verify_vc validates structural integrity and signature only. Add an optional parameter `status_checker: Callable[[str, int], Awaitable[bool]] | None = None`. If provided and `credentialStatus` is present in VC payload, call `await status_checker(statusListId, statusListIndex)` and raise `VCError(STATUS_REVOKED)` if True. This allows RevocationManager to be injected without a circular import."
+      },
+      {
+        "step": 9,
+        "title": "Schema validation hook",
+        "detail": "Add optional `schema_validator: Callable[[dict], bool] | None = None` to verify_vc. If provided, call it with the decoded `credentialSubject` dict. If it returns False, raise `VCError(SCHEMA_MISMATCH)`. Default schema validator is None (no schema check). PolicyEngine (TASK-047) can inject a validator that checks required_scopes and credential_type."
+      },
+      {
+        "step": 10,
+        "title": "Unit test suite with adversarial vectors",
+        "detail": "File: `tests/unit/vc_engine/test_verify.py`. Test cases: (1) valid_vc_ed25519 — sign and verify round-trip; (2) expired_vc — exp set to past, expect VC_EXPIRED; (3) nbf_future — nbf in future, expect VC_NBF; (4) wrong_signature — flip one byte, expect SIGNATURE_INVALID; (5) untrusted_issuer — issuer DID not in trusted set, expect ISSUER_UNTRUSTED; (6) revoked_vc — status_checker returns True, expect STATUS_REVOKED; (7) vp_wrong_aud — aud mismatch, expect VP_AUD_MISMATCH; (8) vp_wrong_nonce — nonce mismatch, expect VP_NONCE_MISMATCH; (9) unknown_did — malformed did:key, expect DID_UNRESOLVABLE; (10) create_vp_then_verify — round-trip VP creation+verification. Use `pytest-asyncio` and `freezegun` for time control."
+      }
+    ]
+  },
+  "project_structure": {
+    "files": {
+      "libs/common/vc_engine/__init__.py": "Public API exports",
+      "libs/common/vc_engine/errors.py": "VCError, VPError, VCErrorCode, VPErrorCode",
+      "libs/common/vc_engine/resolver.py": "DIDResolver, DIDDocument dataclass, LRU cache",
+      "libs/common/vc_engine/verifier.py": "verify_vc, verify_vp async functions",
+      "libs/common/vc_engine/builder.py": "create_vp function",
+      "tests/unit/vc_engine/test_verify.py": "Unit tests with adversarial vectors",
+      "tests/unit/vc_engine/fixtures/": "Pre-signed JWT fixtures for known-good vectors"
+    }
+  },
+  "domain_entities": [
+    {
+      "name": "VerifiedCredential",
+      "type": "dataclass",
+      "fields": "issuer_did: str, subject_did: str, credential_type: list[str], claims: dict, exp: int, nbf: int | None, jti: str, raw_jwt: str"
+    },
+    {
+      "name": "VerifiedPresentation",
+      "type": "dataclass",
+      "fields": "holder_did: str, presentation_id: str, vcs: list[VerifiedCredential], exp: int, aud: str, raw_jwt: str"
+    },
+    {
+      "name": "DIDDocument",
+      "type": "dataclass",
+      "fields": "did: str, verification_method: list[dict], authentication: list[str]"
+    }
+  ],
+  "interface_contracts": [
+    {
+      "function": "verify_vc",
+      "signature": "async def verify_vc(vc_jwt: str, trusted_issuer_dids: set[str], resolver: DIDResolver, now: float | None = None, status_checker: Callable | None = None, schema_validator: Callable | None = None) -> VerifiedCredential",
+      "raises": "VCError with code from VCErrorCode enum"
+    },
+    {
+      "function": "verify_vp",
+      "signature": "async def verify_vp(vp_jwt: str, expected_aud: str, expected_nonce: str | None, expected_env: str | None, resolver: DIDResolver, trusted_issuer_dids: set[str], now: float | None = None) -> VerifiedPresentation",
+      "raises": "VPError with code from VPErrorCode enum, inner VCError accessible via .cause"
+    },
+    {
+      "function": "create_vp",
+      "signature": "def create_vp(vcs: list[str], holder_did: str, holder_key: Ed25519PrivateKey, aud: str, nonce: str, env: str, exp_seconds: int = 300) -> str",
+      "raises": "ValueError on invalid inputs, never leaks key material"
+    }
+  ],
+  "security_constraints": [
+    "Never log raw JWT or private key material — only jti or SHA-256 hash",
+    "Constant-time comparison for aud, nonce, env fields to prevent timing oracles",
+    "LRU cache for DID resolution must not cache unresolvable DIDs (negative caching only with short TTL 30s)",
+    "All VC verification must check signature BEFORE trusting any claim (prevent claim injection)",
+    "VP holder DID must match iss claim — binding check prevents stolen VP replay from different holder",
+    "exp validation must use passed-in `now` clock, never system time directly (prevents test drift)"
+  ],
+  "dependencies": ["TASK-003", "TASK-038", "TASK-028"],
+  "acceptance_criteria": [
+    "verify_vc correctly rejects expired, revoked, signature-invalid, and untrusted-issuer credentials",
+    "verify_vp correctly rejects wrong aud, wrong nonce, and expired presentations",
+    "create_vp produces a JWT-VP verifiable by verify_vp in a round-trip test",
+    "DIDResolver resolves did:key without network access",
+    "All 10 adversarial test vectors pass",
+    "No private key material appears in logs, errors, or exception messages"
+  ]
+}

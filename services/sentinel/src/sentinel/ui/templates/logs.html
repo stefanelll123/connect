@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Request Logs</h1>
+<div class="card filter-form">
+  <form method="get" action="">
+    <label for="decision">Decision:</label>
+    <select name="decision" id="decision">
+      <option value="">All</option>
+      <option value="permit" {% if filter_decision == 'permit' %}selected{% endif %}>Permit</option>
+      <option value="deny" {% if filter_decision == 'deny' %}selected{% endif %}>Deny</option>
+    </select>
+    <label for="service_id">Service ID:</label>
+    <input type="text" name="service_id" id="service_id" value="{{ filter_service_id or '' }}" placeholder="filter by service_id">
+    <button type="submit">Filter</button>
+    <button type="button" id="btn-stream" onclick="startStream()">&#9654; Live Stream</button>
+    <button type="button" id="btn-stop" onclick="stopStream()" style="display:none">&#9632; Stop Stream</button>
+    <span id="stream-status" style="margin-left:.5rem"></span>
+  </form>
+</div>
+<div id="dropped-notice" style="display:none" class="warn-box">&#9888; Events were dropped (client too slow). Some log entries are missing.</div>
+<div class="card">
+  <table id="log-table">
+    <thead>
+      <tr>
+        <th>Time</th><th>Service ID</th><th>Method</th><th>Path</th>
+        <th>Status</th><th>Decision</th><th>Latency (ms)</th><th>JTI Hash</th><th>Error</th>
+      </tr>
+    </thead>
+    <tbody id="log-tbody">
+      {% for ev in events %}
+      <tr class="{% if ev.decision and ev.decision.lower() == 'permit' %}permit{% elif ev.decision and ev.decision.lower() == 'deny' %}deny{% endif %}">
+        <td>{{ ev.ts }}</td>
+        <td>{{ ev.service_id }}</td>
+        <td>{{ ev.http_method or '—' }}</td>
+        <td>{{ ev.http_path or '—' }}</td>
+        <td>{% if ev.http_status %}<span class="badge-{% if ev.http_status < 400 %}ok{% elif ev.http_status < 500 %}warn{% else %}err{% endif %}">{{ ev.http_status }}</span>{% else %}—{% endif %}</td>
+        <td>{% if ev.decision %}<span class="badge-{% if ev.decision.lower() == 'permit' %}ok{% else %}err{% endif %}">{{ ev.decision | upper }}</span>{% else %}—{% endif %}</td>
+        <td>{{ ev.latency_ms if ev.latency_ms is not none else '—' }}</td>
+        <td>{{ (ev.jti_hash or '')[:8] }}</td>
+        <td>{{ ev.error_code or '' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+<script>
+var evtSource = null;
+var MAX_ROWS = 500;
+function startStream() {
+  if (evtSource) return;
+  var decision = document.getElementById('decision').value;
+  var serviceId = document.getElementById('service_id').value;
+  var url = '/ui/logs/stream';
+  var params = [];
+  if (decision) params.push('filter_decision=' + encodeURIComponent(decision));
+  if (serviceId) params.push('filter_service_id=' + encodeURIComponent(serviceId));
+  if (params.length) url += '?' + params.join('&');
+  evtSource = new EventSource(url);
+  document.getElementById('btn-stream').style.display = 'none';
+  document.getElementById('btn-stop').style.display = '';
+  document.getElementById('stream-status').textContent = 'Connected';
+  evtSource.onmessage = function(e) {
+    try { prependRow(JSON.parse(e.data)); } catch(_) {}
+  };
+  evtSource.addEventListener('error', function() {
+    document.getElementById('stream-status').textContent = 'Reconnecting...';
+  });
+}
+function stopStream() {
+  if (evtSource) { evtSource.close(); evtSource = null; }
+  document.getElementById('btn-stream').style.display = '';
+  document.getElementById('btn-stop').style.display = 'none';
+  document.getElementById('stream-status').textContent = 'Stopped';
+}
+function prependRow(ev) {
+  var tbody = document.getElementById('log-tbody');
+  var cls = ev.decision ? (ev.decision.toLowerCase() === 'permit' ? 'permit' : 'deny') : '';
+  var statusBadge = ev.http_status ? '<span class="badge-' + (ev.http_status < 400 ? 'ok' : ev.http_status < 500 ? 'warn' : 'err') + '">' + ev.http_status + '</span>' : '—';
+  var decisionBadge = ev.decision ? '<span class="badge-' + (ev.decision.toLowerCase() === 'permit' ? 'ok' : 'err') + '">' + ev.decision.toUpperCase() + '</span>' : '—';
+  var tr = document.createElement('tr');
+  tr.className = cls;
+  tr.innerHTML = '<td>' + (ev.ts||'') + '</td><td>' + (ev.service_id||'') + '</td><td>' + (ev.http_method||'—') + '</td><td>' + (ev.http_path||'—') + '</td><td>' + statusBadge + '</td><td>' + decisionBadge + '</td><td>' + (ev.latency_ms != null ? ev.latency_ms : '—') + '</td><td>' + ((ev.jti_hash||'').substring(0,8)) + '</td><td>' + (ev.error_code||'') + '</td>';
+  tbody.insertBefore(tr, tbody.firstChild);
+  while (tbody.rows.length > MAX_ROWS) tbody.deleteRow(tbody.rows.length - 1);
+}
+</script>
+{% endblock %}

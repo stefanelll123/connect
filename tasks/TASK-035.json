@@ -1,0 +1,57 @@
+{
+  "id": "TASK-035",
+  "title": "Discovery Service: API Hardening (Rate Limiting, Request Limits, Secure Headers, CORS, Anti-Abuse)",
+  "component": "discovery-service",
+  "status": "not-started",
+  "description": "Apply a comprehensive set of operational security hardening controls to the Discovery Service API. This includes Redis-backed per-endpoint rate limiting, request body size enforcement, strict CORS allow-listing, secure HTTP response headers, idempotency key support for state-mutating endpoints, and abuse detection for sensitive operations (onboarding flood, revocation storms). Controls are implemented as middleware and FastAPI dependencies.",
+  "objectives": [
+    "All public and admin endpoints have defined rate limits enforced by Redis sliding window",
+    "Request body and header sizes are bounded — oversized requests rejected before processing",
+    "Browser-accessible endpoints (admin UI, OIDC callback) protected by correct CORS and CSP headers"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      "Step 1 - Rate Limiter Middleware: Create services/discovery/src/discovery/middleware/rate_limit.py. Use Redis with sliding window algorithm (ZADD + ZRANGEBYSCORE + ZREMRANGEBYSCORE in a pipeline). Key schema: ratelimit:{endpoint_slug}:{identifier}. Identifier = authenticated sub (if auth token present) else IP address. On limit exceeded: return 429 with Retry-After header (seconds until window resets) and body: { code: 'RATE_LIMIT_EXCEEDED', limit, window_seconds, retry_after }. Rate limits are configurable in DiscoverySettings.rate_limits dict.",
+      "Step 2 - Per-Endpoint Rate Limit Configuration: Define rate limits in config: POST /sentinels/onboard: 5 req/token_jti/10min + 50 req/IP/10min. POST /sentinels/enrollments: 20 req/admin-sub/min. POST /credentials/*/revoke: 30 req/admin-sub/min. POST /auth/dev-token (dev only): 10 req/IP/min. GET /registry/resolve: 100 req/sentinel/min. GET /status/{id} (public): 1000 req/IP/min. Admin CRUD endpoints (POST/PATCH/DELETE): 60 req/admin/min. All GET list endpoints: 200 req/user/min.",
+      "Step 3 - Request Body Size Limit: Add middleware that checks Content-Length header before parsing body. If Content-Length > MAX_REQUEST_BODY_BYTES (default 2MB, configurable per endpoint): immediately return 413 { code: 'REQUEST_TOO_LARGE', max_bytes: 2097152 }. For multipart/streaming: enforce byte limit during stream read. NEVER buffer entire request before checking.",
+      "Step 4 - Header Size Limit: Enforce max header size (total headers): 16KB max. Uvicorn setting: h11_max_incomplete_event_size=16384. Custom middleware: if total header bytes > 16384: return 431 Request Header Fields Too Large.",
+      "Step 5 - Secure Response Headers Middleware (all endpoints): X-Content-Type-Options: nosniff. X-Frame-Options: DENY. Referrer-Policy: strict-origin-when-cross-origin. Permissions-Policy: geolocation=(), microphone=(), camera=(). Cross-Origin-Opener-Policy: same-origin. HSTS: Strict-Transport-Security: max-age=63072000; includeSubDomains; preload (only in non-dev environments). Add via Starlette middleware — applied to every response.",
+      "Step 6 - Content-Security-Policy for UI Endpoints: For endpoints that serve HTML (admin UI routes): CSP: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'. For API endpoints (JSON responses): CSP: default-src 'none'. Different CSP per route using a RouteCSPMiddleware.",
+      "Step 7 - CORS Configuration (strict): CORSMiddleware: allow_origins = settings.allowed_cors_origins (explicit list, no wildcard). allow_methods = ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS']. allow_headers = ['Authorization', 'Content-Type', 'X-Request-ID', 'X-Idempotency-Key', 'If-None-Match', 'If-Modified-Since']. allow_credentials = True. max_age = 600. In dev: allowed_cors_origins defaults to ['http://localhost:3000']. In prod: must be explicitly configured — default is empty list (all CORS blocked) and startup validation fails if UI_CORS_ORIGINS is not set.",
+      "Step 8 - Idempotency Key Support: Custom header: X-Idempotency-Key: <uuid4>. On state-mutating endpoints: POST /sentinels/onboard, POST /sentinels/enrollments, POST /credentials/*/revoke, POST /services/{id}/descriptor. Logic: on receipt of idempotency key: check Redis key idempotency:{endpoint}:{key}. If found: return cached response (even if 201). If not found: process normally and cache response (status + body) for 10 minutes. Return X-Idempotency-Used: true header on cached hit.",
+      "Step 9 - Abuse Detection: POST /sentinels/onboard: track per-IP attempts in Redis. If >100 attempts from same IP in 10 minutes with different token_jtis: flag IP as suspicious (Redis set ip_abuse:{ip} TTL=1h), rate limit to 1 req/min. POST /credentials/*/revoke: if >10 revocations within 5 minutes from same admin: require re-authentication (return 428 Precondition Required with X-Require-Reauth: true). Log suspicious activity with SECURITY_ALERT log level to structured log and emit metric security_abuse_events_total.",
+      "Step 10 - Startup Validation: At application startup, validate: Redis connectivity (rate limiter fails gracefully if Redis is down — must behave safely: deny all rate-limited requests OR allow all, based on RATE_LIMIT_FAIL_OPEN setting which defaults to false in prod). Verify allowed_cors_origins is not a wildcard ('*'). Verify HSTS is enabled in prod."
+    ],
+    "project_structure": {
+      "files": {
+        "services/discovery/src/discovery/middleware/rate_limit.py": "Redis sliding window rate limiter middleware",
+        "services/discovery/src/discovery/middleware/request_limits.py": "Body size and header size enforcement",
+        "services/discovery/src/discovery/middleware/secure_headers.py": "Security headers + CSP middleware",
+        "services/discovery/src/discovery/middleware/idempotency.py": "Idempotency key caching middleware",
+        "services/discovery/src/discovery/middleware/abuse_detection.py": "Abuse pattern detection"
+      }
+    },
+    "error_responses": [
+      { "status": 429, "code": "RATE_LIMIT_EXCEEDED", "body": { "type": "about:blank", "title": "Too Many Requests", "status": 429, "detail": "Rate limit of 20/min exceeded. Retry after 45s.", "retry_after": 45 } },
+      { "status": 413, "code": "REQUEST_TOO_LARGE", "body": { "title": "Request Entity Too Large", "status": 413, "detail": "Request body exceeds maximum allowed size of 2097152 bytes." } },
+      { "status": 431, "code": "HEADERS_TOO_LARGE", "body": { "title": "Request Header Fields Too Large", "status": 431, "detail": "Total request header size exceeds 16384 bytes." } },
+      { "status": 428, "code": "REAUTH_REQUIRED", "body": { "title": "Re-authentication Required", "status": 428, "detail": "High-volume activity detected. Please re-authenticate to continue." } }
+    ],
+    "security_constraints": [
+      "RATE_LIMIT_FAIL_OPEN=false in prod: if Redis is unreachable, rate-limited endpoints return 503 rather than allowing unlimited access",
+      "CORS allowed_origins: wildcard '*' is a startup error in non-dev environments",
+      "All security headers applied to 100% of responses — no endpoint exemptions",
+      "Idempotency key responses must use the same HTTP status code as the original response — no status code normalization",
+      "Abuse detection logs at SECURITY_ALERT level — must be routed to security monitoring pipeline"
+    ]
+  },
+  "dependencies": ["TASK-021", "TASK-022"],
+  "acceptance_criteria": [
+    "POST /sentinels/onboard returns 429 on the 6th request within 10 minutes for same token_jti",
+    "POST with body size > 2MB returns 413 before body is parsed",
+    "Every API response includes X-Content-Type-Options: nosniff and X-Frame-Options: DENY",
+    "CORS request from unlisted origin returns 403",
+    "POST /revoke with X-Idempotency-Key returns cached 200 on second call without re-processing",
+    "Startup fails if allowed_cors_origins = ['*'] in non-dev environment"
+  ]
+}

@@ -1,0 +1,33 @@
+replicaCount: 2
+
+image:
+  tag: "staging"
+
+vault:
+  enabled: true
+
+tls:
+  enabled: true
+
+hpa:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 4
+
+persistence:
+  enabled: false
+
+ingress:
+  enabled: true
+  hosts:
+    - host: discovery.staging.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: discovery-staging-tls
+      hosts:
+        - discovery.staging.example.com
+
+env:
+  DEPLOYMENT_ENVIRONMENT: staging

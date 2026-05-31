@@ -1,0 +1,78 @@
+{
+  "uid": "sentinel-discovery",
+  "title": "Sentinel — Discovery Service",
+  "tags": ["sentinel", "discovery", "api"],
+  "timezone": "browser",
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Service Uptime",
+      "gridPos": {"x": 0, "y": 0, "w": 6, "h": 4},
+      "targets": [{"refId": "A", "datasource": {"uid": "prometheus"}, "expr": "up{job=\"discovery\"}"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}},
+      "fieldConfig": {"defaults": {"mappings": [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}]}}
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Request Rate (5m)",
+      "gridPos": {"x": 6, "y": 0, "w": 6, "h": 4},
+      "targets": [{"refId": "A", "datasource": {"uid": "prometheus"}, "expr": "sum(rate(http_requests_total{job=\"discovery\"}[5m]))"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}},
+      "fieldConfig": {"defaults": {"unit": "reqps"}}
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Enrollment Queue Depth",
+      "gridPos": {"x": 12, "y": 0, "w": 6, "h": 4},
+      "targets": [{"refId": "A", "datasource": {"uid": "prometheus"}, "expr": "discovery_enrollment_queue_depth"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}},
+      "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 100}, {"color": "red", "value": 500}]}}}
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Credentials Issued (1h)",
+      "gridPos": {"x": 18, "y": 0, "w": 6, "h": 4},
+      "targets": [{"refId": "A", "datasource": {"uid": "prometheus"}, "expr": "sum(increase(discovery_credential_issued_total[1h]))"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}},
+      "fieldConfig": {"defaults": {"unit": "short"}}
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "API Request Rate by Path & Status",
+      "gridPos": {"x": 0, "y": 4, "w": 24, "h": 8},
+      "targets": [
+        {"refId": "A", "datasource": {"uid": "prometheus"}, "expr": "sum(rate(http_requests_total{job=\"discovery\", status=~\"2..\"}[5m])) by (path)", "legendFormat": "2xx {{path}}"},
+        {"refId": "B", "datasource": {"uid": "prometheus"}, "expr": "sum(rate(http_requests_total{job=\"discovery\", status=~\"4..\"}[5m])) by (path)", "legendFormat": "4xx {{path}}"},
+        {"refId": "C", "datasource": {"uid": "prometheus"}, "expr": "sum(rate(http_requests_total{job=\"discovery\", status=~\"5..\"}[5m])) by (path)", "legendFormat": "5xx {{path}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps"}}
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Registration DB Write Latency (p50/p95/p99)",
+      "gridPos": {"x": 0, "y": 12, "w": 12, "h": 8},
+      "targets": [
+        {"refId": "A", "datasource": {"uid": "prometheus"}, "expr": "histogram_quantile(0.50, sum(rate(discovery_db_write_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p50"},
+        {"refId": "B", "datasource": {"uid": "prometheus"}, "expr": "histogram_quantile(0.95, sum(rate(discovery_db_write_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p95"},
+        {"refId": "C", "datasource": {"uid": "prometheus"}, "expr": "histogram_quantile(0.99, sum(rate(discovery_db_write_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p99"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Credential Issuance Rate",
+      "gridPos": {"x": 12, "y": 12, "w": 12, "h": 8},
+      "targets": [{"refId": "A", "datasource": {"uid": "prometheus"}, "expr": "sum(rate(discovery_credential_issued_total[5m])) by (type)", "legendFormat": "{{type}}"}],
+      "fieldConfig": {"defaults": {"unit": "ops"}}
+    }
+  ]
+}

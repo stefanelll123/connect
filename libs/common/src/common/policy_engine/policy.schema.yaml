@@ -1,0 +1,37 @@
+# Sentinel Policy Schema (informational — not enforced at parse time)
+#
+# version:    Policy version string (e.g. "1.0")
+# issued_by:  DID of the governance authority that signed the config bundle
+# issued_at:  ISO-8601 timestamp of policy generation
+# rules:      Ordered list of policy rules; evaluated top-to-bottom by priority
+
+version: "1.0"
+issued_by: "did:key:z6Mk..."
+issued_at: "2025-01-01T00:00:00Z"
+
+rules:
+  - id: "<unique-rule-identifier>"
+
+    # Matching conditions — all must evaluate to true for this rule to fire.
+    # Use '*' for exact-any, fnmatch globs ('**', '*/v1/*') for paths.
+    service_id: "<service-id | *>"
+    path_glob:  "<fnmatch-glob | **>"
+    method:     "<GET | POST | PUT | PATCH | DELETE | *>"
+    env:        "<prod | staging | dev | *>"
+
+    # Access requirements — ALL required_scopes must be present in the presented VCs.
+    required_scopes:
+      - "scope:read"
+      - "scope:write"
+
+    # Optional: at least one VC must come from this issuer DID.
+    required_issuer: "did:key:z6Mk..."  # or null
+
+    # Optional: at least one VC must declare this credential type.
+    required_credential_type: "SentinelAccessCredential"  # or null
+
+    # Terminal decision for this rule (case-insensitive).
+    decision: "permit"  # or "deny"
+
+    # Lower priority value = evaluated first (tie-break: more-specific path wins).
+    priority: 10

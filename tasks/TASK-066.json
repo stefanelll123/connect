@@ -1,0 +1,95 @@
+{
+  "id": "TASK-066",
+  "title": "Operational Runbooks: Incident Response, Backup/DR, Break-Glass Access, Recovery Checklist",
+  "component": "docs/runbooks",
+  "status": "pending",
+  "description": "Document comprehensive operational runbooks for the decentralized sentinel platform. Cover 5 incident categories with structured response procedures (detect → contain → eradicate → recover → post-mortem). Define backup and disaster recovery procedures with explicit RPO/RTO targets. Document break-glass access procedures, two-person rules for production actions, and a standard recovery checklist for verifying system health after any incident.",
+  "objectives": [
+    "Runbook: Sentinel key compromise — detect, contain, eradicate, recover, post-mortem",
+    "Runbook: Issuer compromise — disable on-chain, revoke all credentials, notify consumers",
+    "Runbook: Credential leakage — scope and timeline assessment, targeted revocation, attestation",
+    "Runbook: Discovery service compromise — isolate, restore from backup, re-enroll sentinels",
+    "Runbook: Blockchain/chain outage — degraded operation procedures, fail-closed enforcement, recovery",
+    "Backup/DR: PostgreSQL RPO/RTO, Vault snapshots, config artifacts, recovery procedures",
+    "Break-glass access document: emergency admin access, two-person rule for prod, audit trail requirements",
+    "Recovery checklist: 10-item health verification checklist after any incident"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      {
+        "step": 1,
+        "title": "Runbook structure and format",
+        "detail": "All runbooks stored under `docs/runbooks/`. Format: Markdown with structured headers. Each runbook includes: incident severity classification (Critical/High/Medium), estimated time to execute each phase, required roles (on-call engineer, security lead, platform lead), communication channels (Slack/email templates), and escalation path. Standard section headers: `## Indicators of Compromise`, `## Immediate Actions (< 15 min)`, `## Contain`, `## Eradicate`, `## Recover`, `## Verify Recovery`, `## Post-Mortem`. Include severity-specific SLAs: Critical = respond in 15 min, contain in 1h, recover in 4h."
+      },
+      {
+        "step": 2,
+        "title": "Incident 1: Sentinel key compromise",
+        "detail": "File: `docs/runbooks/incident-sentinel-key-compromise.md`. Indicators: unexpected signing events in audit log (session from unknown IP), unexpected DID-signed transactions on-chain, alert from SIEM on key file access. Immediate (< 15 min): (1) Call `sentinelctl status` — confirm sentinel is serving. (2) `sentinelctl rotate-key --emergency` — generates new DID key pair, registers new DID on-chain (requires operator to approve new DID in Discovery), marks old DID as compromised. (3) Discovery operator: PATCH `/api/v1/sentinels/{id}/revoke-did` — disables old DID in ServiceRegistry on-chain. Old VC signed with old DID key: already invalid because new DID ≠ old DID (consumer VPs will fail vc.credentialSubject.id verification). Contain: (4) Isolate sentinel network (NetworkPolicy or cloud security group). (5) Pull and preserve logs from LogRingBuffer. Eradicate: (6) Run `sentinelctl restore` from last known-good backup. (7) Re-enroll with new key. (8) Investigate how key was accessed (file permissions, Vault audit log). Recover: (9) Re-issue all credentials for this sentinel from Discovery. (10) Restore sentinel to service. Post-mortem: Review key storage mechanism; if disk-based, recommend Vault migration (TASK-049)."
+      },
+      {
+        "step": 3,
+        "title": "Incident 2: Issuer compromise",
+        "detail": "File: `docs/runbooks/incident-issuer-compromise.md`. Indicators: issuer private key exposed (leaked credentials, insider threat), unexpected VC issuances not matching authorized requests in Discovery audit log. Immediate: (1) Platform lead calls `IssuerRegistry.disableIssuer(issuerDID)` on-chain via `sentinelctl` or Hardhat/Foundry CLI — requires operator private key (held in HSM or Vault). (2) This immediately invalidates all VCs from this issuer — sentinels' `is_issuer_trusted()` returns False within one trust cache TTL (60s). ALL subject sentinels receive DENY. (3) Post to communication channel: 'Issuer X disabled — all services using credentials from this issuer affected'. Contain: (4) Identify scope: query Discovery DB `SELECT * FROM credentials WHERE issuer_did = $1 AND status = 'active'`. (5) Bulk revoke all active credentials from this issuer: POST `/api/v1/credentials/bulk-revoke` with issuer_did filter. Eradicate: (6) Rotate issuer signing key — generate new key in Vault, update Discovery `issuer_key` config. (7) Re-register issuer on-chain with new DID: `IssuerRegistry.registerIssuer(newDID, metadata)`. Recover: (8) Re-issue all legitimate credentials (with new issuer DID). (9) Notify affected sentinel operators to update stored VCs. Post-mortem: Evaluate issuer key ceremony procedures; implement M-of-N multisig for issuer key operations."
+      },
+      {
+        "step": 4,
+        "title": "Incident 3: Credential leakage",
+        "detail": "File: `docs/runbooks/incident-credential-leakage.md`. Scenario: A credential JWT is extracted from a sentinel's disk/memory and used by an attacker. Indicators: requests from unexpected IP/source, jti values appearing in replay cache from unrecognized source, anomaly in audit log (unexpected service pair), alert from `ClockSkewViolationSpike`. Assess scope: (1) Identify leaked credential: use jti_hash from audit log to find the specific credential (jti itself not stored, but jti_hash[:16] allows correlation). (2) Determine time window: from iat to now = exposure window. (3) Query Discovery DB for credential details (consumer_did, producer_service_id, scopes). Contain: (4) Revoke the specific credential immediately via Discovery `/api/v1/credentials/{id}/revoke`. (5) Time-to-containment = time for producer to start rejecting = Δ (max 30s in prod). Eradicate: (6) Check if any unauthorized requests succeeded in the exposure window (audit log query). (7) Notify producer service operator of potential unauthorized access during window. Recover: (8) Re-issue a new credential to the legitimate consumer. Post-mortem: Review sentinel credential storage (encryption at rest), review credential TTL policy (shorter TTL = smaller exposure window)."
+      },
+      {
+        "step": 5,
+        "title": "Incident 4: Discovery service compromise",
+        "detail": "File: `docs/runbooks/incident-discovery-compromise.md`. Indicators: unauthorized API requests in Discovery audit log, unexpected entries in ServiceRegistry on-chain, Grafana anomaly in onboarding events, chain event mismatch vs. Discovery DB state. Immediate (< 15 min): (1) Isolate Discovery: remove from load balancer (Kubernetes: `kubectl scale deployment sentinel-discovery --replicas=0`). Sentinels fall back to cached state — producers continue to reject unauthorized requests using cached trust config. (2) Preserve evidence: take DB snapshot, dump application logs. (3) Announce degraded mode to all sentinel operators. Contain: (4) If DB compromised: identify tampered records by comparing DB state with on-chain state (ServiceRegistry, IssuerRegistry are ground truth). Flag discrepancies. (5) Rotate all Discovery JWT signing keys (Vault: `vault kv put secret/discovery/jwt-key key=$(openssl rand -hex 32)`). This invalidates all existing session tokens. Eradicate: (6) Restore Discovery DB from last verified backup (see Backup/DR runbook). (7) Re-index from chain events: run `python discovery/admin/reindex_from_chain.py --from-block 0` — rebuilds issuer registry and service registry from on-chain events. Recover: (8) Bring Discovery back online in read-only mode. Validate DB state vs. chain. Switch to full operation. (9) Notify all sentinel operators to re-authenticate and verify their registrations. Post-mortem: Review Discovery API authorization controls, consider requiring on-chain anchor for all Discovery-approved actions."
+      },
+      {
+        "step": 6,
+        "title": "Incident 5: Chain/RPC outage",
+        "detail": "File: `docs/runbooks/incident-chain-outage.md`. Scenarios: (A) Sepolia testnet unstable — blocks stalling, RPC timeouts. (B) Custom RPC provider outage. Indicators: `ChainIndexerLag` alert, `sentinel_chain_rpc_errors_total` spike, `StatusListStale` > Δ alert. Immediate: (1) Confirm outage: `curl -X POST $RPC_URL -d '{\"jsonrpc\":\"2.0\",\"method\":\"eth_blockNumber\"}` → check response. (2) Identify scope: check Grafana chain dashboard for lag trend. (3) If lag > 2× Δ: all sentinels will fail-closed (no new requests authorized) — this is expected security behavior (TASK-046 fail_closed policy). Communicate to stakeholders: 'Platform in fail-closed mode due to chain outage. No new authorized requests until chain recovers.' Contain: (4) If optional secondary RPC available (e.g., Alchemy fallback): update `BLOCKCHAIN_FALLBACK_RPC_URL` in Discovery config (Discovery propagates to sentinels). (5) Sentinels with `OUTAGE_POLICY=degrade_read_only` can use cached status if outage < Δ. Recover: (6) Confirm chain is producing blocks: monitor `eth_blockNumber` progression. (7) Discovery re-indexes missed events via scheduler. (8) Sentinel caches refresh automatically at next Δ cycle. (9) Confirm `StatusListStale` alert clears. Post-mortem: Evaluate multi-RPC provider strategy (round-robin with health checks), and consider whether Δ is appropriately sized for expected RPC reliability."
+      },
+      {
+        "step": 7,
+        "title": "Backup and Disaster Recovery",
+        "detail": "File: `docs/runbooks/backup-dr.md`. PostgreSQL backup: scheduled pg_dump every 6h (RPO: 6h for DB). Retention: 30 daily + 12 monthly. Backup encryption: `gpg --symmetric --cipher-algo AES256`. Store encrypted dumps in object storage (S3/GCS) with versioning. Recovery: `pg_restore -d discovery_db < backup.dump`. RTO: 2h (includes DB restore + reindex from chain). Vault backup: `vault operator raft snapshot save vault-snapshot-$(date +%Y%m%d).snap` every 12h. Store alongside DB backups. Vault recovery: `vault operator raft snapshot restore`. Configuration artifacts: Smart contract ABIs and deployed addresses stored in git repository (immutable history). Discovery config bundle: exported periodically and stored in encrypted artifacts. Sentinel backup: `sentinelctl backup` (TASK-049 implementation) — encrypted backup of DID document + credential store. Store off-sentinel. Recovery test: quarterly DR drill — restore Discovery DB from backup, re-index from chain, verify all registrations intact within RTO."
+      },
+      {
+        "step": 8,
+        "title": "Break-glass access and two-person rule",
+        "detail": "File: `docs/runbooks/break-glass-access.md`. Break-glass access: Emergency admin credentials stored in sealed envelope in physical safe and in Vault `secret/break-glass/` (requires 3-of-5 Vault unseal keys to access). Access procedure: (1) Open incident ticket. (2) Two engineers must both authenticate to Vault with their own tokens. (3) Both must approve the Vault policy override: `vault auth enable approle` with emergency role. (4) All break-glass access logged in Vault audit log AND manual incident ticket. Two-person rule for production: All prod Kubernetes deployments require 2 GitHub reviewer approvals (TASK-064). All on-chain issuer disable/enable operations require 2 authorized personnel (enforced in Helm chart `environment.production.reviewers: 2` and documented here). Contract upgrade: 3-of-5 multisig (if using upgradeable contracts). Discovery DB direct access: prohibited without incident ticket + second engineer as witness. Audit trail: break-glass activity generates PagerDuty P1 alert automatically."
+      },
+      {
+        "step": 9,
+        "title": "Recovery checklist",
+        "detail": "File: `docs/runbooks/recovery-checklist.md`. Standard 10-item checklist to verify after any incident: (1) Status lists not stale: `sentinel_status_list_age_seconds < sentinel_status_list_delta_threshold_seconds` — check Grafana 'Revocation & Trust' dashboard. (2) Issuer status: `SELECT did, status FROM issuers WHERE status = 'disabled'` — confirm no unexpected disabled issuers. Also verify via IssuerRegistry.getIssuerStatus() on-chain matches DB. (3) Service descriptor validity: all active sentinels have published descriptors with `valid_until > now() + 1h`. Query: `SELECT service_id, descriptor_valid_until FROM sentinels WHERE status = 'active'`. (4) Trust cache freshness on all sentinels: check Prometheus `sentinel_trust_cache_age_seconds < 120s` for all instances. (5) Chain indexer caught up: `sentinel_chain_indexer_lag_blocks < 10`. (6) No active ClockSkewViolationSpike alerts. (7) Replay cache operational: verify Redis health via `redis-cli ping`. (8) All sentinel readiness probes passing: `kubectl get pods -l role=sentinel` — all Running+Ready. (9) Discovery API responding: GET /health/ready returns `{db: 'ok', redis: 'ok', chain: 'ok'}`. (10) Recent audit log entries look normal: no unexpected `decision=DENY` spikes in last 30 min (Grafana Security Incidents dashboard)."
+      }
+    ]
+  },
+  "project_structure": {
+    "files": {
+      "docs/runbooks/incident-sentinel-key-compromise.md": "Sentinel key compromise runbook",
+      "docs/runbooks/incident-issuer-compromise.md": "Issuer compromise runbook",
+      "docs/runbooks/incident-credential-leakage.md": "Credential leakage runbook",
+      "docs/runbooks/incident-discovery-compromise.md": "Discovery service compromise runbook",
+      "docs/runbooks/incident-chain-outage.md": "Blockchain/RPC outage runbook",
+      "docs/runbooks/backup-dr.md": "Backup and disaster recovery procedures",
+      "docs/runbooks/break-glass-access.md": "Break-glass access and two-person rule",
+      "docs/runbooks/recovery-checklist.md": "10-item post-incident recovery checklist",
+      "docs/runbooks/README.md": "Runbook index with links and severity guide"
+    }
+  },
+  "security_constraints": [
+    "Break-glass access credentials must never be stored in version control — only in Vault or physical safe",
+    "All production on-chain operations (issuer disable/enable, contract upgrade) require two-person rule — no solo execution",
+    "Incident communications must not include raw credential JWTs, private keys, or blockchain private keys — use hashes/identifiers",
+    "Post-mortem documents scrubbed of PII before publishing — use pseudonymized incident IDs",
+    "DR test results (RPO/RTO achieved) must be logged in incident tracking system and reviewed quarterly"
+  ],
+  "dependencies": ["TASK-002", "TASK-034", "TASK-063", "TASK-064", "TASK-049"],
+  "acceptance_criteria": [
+    "All 5 incident runbooks authored and peer-reviewed by at least 2 team members",
+    "Backup/DR: DR drill completed — DB restored from backup within RTO (2h), all sentinels operational within 4h",
+    "Break-glass access procedure tested in staging — documented evidence that 2-person access works",
+    "Recovery checklist validated: all 10 items executable with correct outputs in staging environment",
+    "Runbooks linked from Grafana alert annotations (runbook_url in AlertManager rules from TASK-063)",
+    "Contract deployment emergency procedure tested: issuer disabled on Sepolia within 5 minutes of simulated compromise"
+  ]
+}

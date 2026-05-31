@@ -1,0 +1,135 @@
+{
+  "id": "TASK-011",
+  "title": "Secret Storage Interface: Local AES-256-GCM Backend and HashiCorp Vault Backend",
+  "component": "infrastructure",
+  "status": "not-started",
+  "description": "Implement a SecretStorage abstraction with two concrete backends: (1) a local encrypted file backend using AES-256-GCM with scrypt key derivation for development/testing, and (2) a HashiCorp Vault KV v2 backend for production. All private key material for DIDs and all signing keys must go through this interface exclusively. No direct environment variable access for secrets.",
+  "objectives": [
+    "Single SecretStorage protocol that both backends implement identically",
+    "Local backend uses scrypt-derived key from environment master key — no plaintext secrets on disk",
+    "Vault backend uses AppRole authentication with short-lived tokens",
+    "Selection between backends via SENTINEL_SECRET_BACKEND=local|vault environment variable"
+  ],
+  "implementation_guidance": {
+    "overview": "Define SecretStorage as a Python Protocol (structural typing) / ABC in libs/common/secret_storage/. Implement LocalSecretStorage (AES-256-GCM, scrypt) and VaultSecretStorage (hvac library, AppRole auth). A factory function select_backend() reads SENTINEL_SECRET_BACKEND and returns the appropriate instance. Async interface using asyncio for I/O-bound Vault calls.",
+    "steps": [
+      "Step 1 - SecretStorage Protocol: Define in libs/common/secret_storage/base.py. Methods: async get(key: str) -> bytes, async set(key: str, value: bytes) -> None, async delete(key: str) -> None, async exists(key: str) -> bool. Key naming convention: 'sentinels/{service_id}/{role}/{env}/did_private_key', 'sentinels/{service_id}/{role}/{env}/signing_key'.",
+      "Step 2 - LocalSecretStorage — Key Derivation: Master key provided via env var SECRET_STORAGE_MASTER_KEY (hex-encoded 32 bytes). Use scrypt for key derivation: n=2^17, r=8, p=1, dklen=32. Salt is stored per-secret alongside the ciphertext. Never store the master key in any persistent file.",
+      "Step 3 - LocalSecretStorage — Storage Format: Each secret stored as a JSON file at SECRET_STORAGE_PATH/{key_hash}.enc. File structure: {\"version\": 1, \"alg\": \"AES-256-GCM\", \"kdf\": \"scrypt\", \"kdf_params\": {\"n\": 131072, \"r\": 8, \"p\": 1}, \"salt\": \"<hex>\", \"iv\": \"<hex>\", \"ciphertext\": \"<hex>\", \"tag\": \"<hex>\"}. key_hash = SHA-256(key)[:16] used as filename — do NOT store the raw key name in the filename.",
+      "Step 4 - LocalSecretStorage — Encryption: Use Python cryptography library. AES-256-GCM via AESGCM(derived_key). iv = os.urandom(12). Authenticate the full JSON metadata as AAD (all fields except ciphertext and tag).",
+      "Step 5 - LocalSecretStorage — File Locking: Use asyncio.Lock per key path to prevent concurrent writes. On write, use write-then-rename pattern (write to .tmp, rename atomically) to prevent partial writes.",
+      "Step 6 - VaultSecretStorage — AppRole Authentication: vault_addr, vault_role_id, vault_secret_id from environment. On startup, call POST /v1/auth/approle/login. Cache the client_token and renewable=true lease. Implement token renewal loop (renew at lease_duration * 0.75). Re-authenticate if renewal fails.",
+      "Step 7 - VaultSecretStorage — KV v2 Operations: Mount path: secret/ (configurable). For get: GET /v1/secret/data/{key} → data.data.value (base64 decode). For set: POST /v1/secret/data/{key} with {\"data\": {\"value\": base64(bytes)}}. For delete: POST /v1/secret/metadata/{key}.",
+      "Step 8 - VaultSecretStorage — Error Handling: HTTP 404 → raise SecretNotFoundError(key). HTTP 403 → raise SecretAccessDeniedError(key). Connection error → raise SecretStorageUnavailableError. Never expose Vault internal errors to callers — wrap and log.",
+      "Step 9 - Factory and Configuration: select_backend(settings: SecretStorageSettings) -> SecretStorage. SecretStorageSettings: backend: Literal['local', 'vault'] = 'local' (from env SENTINEL_SECRET_BACKEND). Validate at startup — fail fast with clear error message if required config is missing.",
+      "Step 10 - Unit Tests: Test LocalSecretStorage: round-trip (set then get), tampered ciphertext raises ValueError, missing key raises SecretNotFoundError, concurrent writes are safe. Test VaultSecretStorage: use respx or pytest-httpx to mock Vault HTTP API. Minimum 80% coverage."
+    ],
+    "project_structure": {
+      "files": {
+        "libs/common/src/common/secret_storage/__init__.py": "Exports SecretStorage, LocalSecretStorage, VaultSecretStorage, select_backend",
+        "libs/common/src/common/secret_storage/base.py": "SecretStorage Protocol + exceptions",
+        "libs/common/src/common/secret_storage/local.py": "LocalSecretStorage implementation",
+        "libs/common/src/common/secret_storage/vault.py": "VaultSecretStorage implementation",
+        "libs/common/src/common/secret_storage/factory.py": "select_backend() factory",
+        "libs/common/src/common/secret_storage/settings.py": "Pydantic settings model",
+        "libs/common/tests/secret_storage/test_local.py": "LocalSecretStorage tests",
+        "libs/common/tests/secret_storage/test_vault.py": "VaultSecretStorage tests (mocked)"
+      }
+    },
+    "domain_entities": [
+      {
+        "name": "SecretStorage",
+        "type": "Protocol (ABC)",
+        "module": "common.secret_storage.base",
+        "methods": [
+          {"name": "get", "signature": "async def get(self, key: str) -> bytes", "raises": ["SecretNotFoundError"]},
+          {"name": "set", "signature": "async def set(self, key: str, value: bytes) -> None"},
+          {"name": "delete", "signature": "async def delete(self, key: str) -> None"},
+          {"name": "exists", "signature": "async def exists(self, key: str) -> bool"}
+        ]
+      },
+      {
+        "name": "LocalEncryptedFile",
+        "type": "Dataclass",
+        "fields": [
+          {"name": "version", "type": "int", "value": 1},
+          {"name": "alg", "type": "str", "value": "AES-256-GCM"},
+          {"name": "kdf", "type": "str", "value": "scrypt"},
+          {"name": "kdf_params", "type": "dict", "value": "{n: 131072, r: 8, p: 1}"},
+          {"name": "salt", "type": "str", "description": "hex-encoded 32 bytes"},
+          {"name": "iv", "type": "str", "description": "hex-encoded 12 bytes"},
+          {"name": "ciphertext", "type": "str", "description": "hex-encoded ciphertext"},
+          {"name": "tag", "type": "str", "description": "hex-encoded 16-byte GCM tag"}
+        ]
+      },
+      {
+        "name": "SecretStorageSettings",
+        "type": "Pydantic BaseSettings",
+        "fields": [
+          {"name": "backend", "type": "Literal['local', 'vault']", "default": "local"},
+          {"name": "master_key_hex", "type": "SecretStr", "env": "SECRET_STORAGE_MASTER_KEY", "required_if": "backend == 'local'"},
+          {"name": "storage_path", "type": "Path", "env": "SECRET_STORAGE_PATH", "default": "/tmp/sentinel_secrets"},
+          {"name": "vault_addr", "type": "AnyHttpUrl", "env": "VAULT_ADDR", "required_if": "backend == 'vault'"},
+          {"name": "vault_role_id", "type": "SecretStr", "env": "VAULT_ROLE_ID"},
+          {"name": "vault_secret_id", "type": "SecretStr", "env": "VAULT_SECRET_ID"},
+          {"name": "vault_kv_mount", "type": "str", "default": "secret"}
+        ]
+      }
+    ],
+    "data_structures": {
+      "local_encrypted_file_example": {
+        "version": 1,
+        "alg": "AES-256-GCM",
+        "kdf": "scrypt",
+        "kdf_params": {"n": 131072, "r": 8, "p": 1},
+        "salt": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6a7b8c9d0e1f2a3b4c5d6a7b8c9d0e1f2",
+        "iv": "0102030405060708090a0b0c",
+        "ciphertext": "deadbeef1234567890abcdef...",
+        "tag": "0102030405060708090a0b0c0d0e0f10"
+      },
+      "vault_kv_response_example": {
+        "request_id": "abc123",
+        "data": {
+          "data": {"value": "base64encodedBytes=="},
+          "metadata": {"version": 1, "created_time": "2024-01-15T10:00:00Z"}
+        }
+      }
+    },
+    "error_handling": {
+      "exceptions": [
+        {"name": "SecretNotFoundError", "description": "Key does not exist in storage"},
+        {"name": "SecretAccessDeniedError", "description": "Permission denied — Vault 403 or file permission error"},
+        {"name": "SecretStorageUnavailableError", "description": "Backend is unreachable"},
+        {"name": "SecretStorageCorruptedError", "description": "Decryption or integrity check failed — tampered ciphertext"}
+      ]
+    },
+    "security_constraints": [
+      "Master key MUST be exactly 32 bytes (64 hex chars) — validate length at startup, fail with clear error",
+      "scrypt parameters MUST NOT be weakened below n=2^17 in production — test-only override allowed with TEST_WEAK_KDF=1 flag",
+      "Local storage directory MUST have permissions 0700 (owner only) — set programmatically on first use",
+      "Secret keys (bytes) MUST be zeroed from memory after use — use cryptography.hazmat.primitives.keywrap or explicit memset equivalent",
+      "Vault token MUST NOT be logged — use log masking (***) for all token values in structured logs",
+      "AES-GCM IV/nonce MUST be cryptographically random — never reuse IV with the same key (scrypt salt ensures key uniqueness per secret)",
+      "GCM authentication tag verification failure MUST raise immediately and MUST be logged as a SECURITY_ALERT event"
+    ]
+  },
+  "technical_requirements": [
+    "Python cryptography library >= 42.0.0",
+    "hvac >= 2.1.0 for Vault integration",
+    "httpx (async) for Vault HTTP calls",
+    "Pydantic-settings for configuration"
+  ],
+  "dependencies": [
+    "TASK-009"
+  ],
+  "acceptance_criteria": [
+    "LocalSecretStorage: set(key, value) then get(key) returns identical bytes",
+    "LocalSecretStorage: tampered ciphertext raises SecretStorageCorruptedError on get",
+    "LocalSecretStorage: all .enc files have directory permissions 0700",
+    "VaultSecretStorage: all operations succeed against a mocked Vault HTTP API",
+    "select_backend with SENTINEL_SECRET_BACKEND=local returns LocalSecretStorage instance",
+    "select_backend with SENTINEL_SECRET_BACKEND=vault returns VaultSecretStorage instance",
+    "Missing SECRET_STORAGE_MASTER_KEY causes startup failure with a clear error message",
+    "All tests pass with coverage >= 80%"
+  ]
+}

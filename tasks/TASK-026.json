@@ -1,0 +1,160 @@
+{
+  "id": "TASK-026",
+  "title": "Discovery Service API: Sentinel Onboarding Endpoint with mTLS and DID Proof-of-Possession",
+  "component": "discovery-service",
+  "status": "not-started",
+  "description": "Implement the sentinel onboarding endpoint that validates the enrollment token, executes a DID-bound challenge-response proof-of-possession (PoP), and registers the sentinel identity. The endpoint performs a two-phase handshake: first a challenge issuance (if the client does not include a proof inline), then a proof submission that atomically consumes the token and creates the sentinel record. mTLS is enforced at the transport layer. The endpoint is idempotent for retries.",
+  "objectives": [
+    "Cryptographically binding the sentinel DID to the enrollment token — no impersonation possible",
+    "Atomic one-time token consumption preventing replay or double-registration",
+    "Idempotent behavior for retried registrations (network failures during onboarding)"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      "Step 1 - Transport Security: Enforce mTLS for this endpoint. The client (sentinel) must present a valid client TLS certificate. At minimum in dev/test: mutual TLS with a self-signed CA managed by the environment. In prod: use the government PKI or a dedicated sentinel CA. The TLS client certificate CN/SAN does NOT grant authorization by itself — it is an additional channel binding, not the sole auth factor.",
+      "Step 2 - Two-Phase Handshake Design: Phase 1 (Challenge): POST /api/v1/sentinels/onboard with only { enrollment_token, did } in body. If no proof field is present, validate the token (signature, exp, hash lookup, status=APPROVED), generate a nonce, store it in Redis with key onboard:nonce:{jti} TTL=120s, return 200 { challenge_nonce, challenge_expires_at }. Phase 2 (Proof): POST /api/v1/sentinels/onboard with { enrollment_token, did, proof: { type, created, challenge_nonce, proof_value } }. Process full onboarding.",
+      "Step 3 - Enrollment Token Validation: Extract JWT from enrollment_token field. Verify JWT signature using Discovery issuer public key. Check: exp > now(), iss == DISCOVERY_DID. Compute SHA-256 of submitted token string; look up token_hash in enrollment_tokens where jti matches JWT.jti. Verify status=APPROVED. If any check fails → 401 or 403 with specific error code.",
+      "Step 4 - DID Proof-of-Possession Verification: Supported DID method for MVP: did:key (self-contained, no resolution needed). Resolve the public key from the did:key DID. Verify the proof_value (a JWS/signature) over canonical PoP payload: { jti, did, challenge_nonce, iat }. PoP payload must be serialized as compact JSON (sorted keys). Signature must use the same algorithm as registered in DID doc (Ed25519/P-256). Reject if iat is more than 30 seconds old (clock drift protection).",
+      "Step 5 - Nonce Validation: Retrieve nonce from Redis key onboard:nonce:{jti}. Verify that challenge_nonce in request matches. Delete the Redis key immediately after retrieval (one-time use). If key missing (expired or already used) → 401 NONCE_EXPIRED.",
+      "Step 6 - Atomic Token Consumption: Call EnrollmentTokenRepository.consume_atomic(session, jti). Uses SELECT ... FOR UPDATE SKIP LOCKED to prevent concurrent consumption. Sets status='CONSUMED', consumed_at=now(). Returns the token record or raises TokenAlreadyConsumedError. On TokenAlreadyConsumedError → 409 ENROLLMENT_ALREADY_CONSUMED.",
+      "Step 7 - Sentinel Record Creation (Idempotent): Check if a sentinel with (did, role, env) already exists. If exists and status=active → treat as idempotent re-registration (return existing record + fresh config). If exists and status=decommissioned → re-activate with new registered_at. If not exists → INSERT into sentinels: { id (uuid4), service_id, did, role, env, is_active=true, created_at=now(), last_seen=now(), config_version=1 }.",
+      "Step 8 - Response Bundle: Return 201 (first registration) or 200 (re-registration) with: { sentinel_id, did, role, env, config_version, discovery: { onboard_url, sync_url, credentials_url }, chain: { network, rpc_urls, contract_addresses: { issuer_registry, trust_policy_registry, status_registry, service_registry } }, revocation: { delta_seconds: 300 }, observability: { otlp_endpoint } }. This bundle bootstraps the sentinel without any additional HTTP calls for basic operation.",
+      "Step 9 - Initial Config Bundle + Credentials: After sentinel record creation, call ConfigBundleService.generate_and_sign(sentinel_id) to produce version-1 config bundle (TASK-027). If TASK-028 is implemented: call CredentialIssuerService.issue_sentinel_identity(sentinel) to issue the initial SentinelIdentityCredential. Include credential JWT in response under credentials.sentinel_identity if ready, or indicate credentials_pending=true if issued asynchronously.",
+      "Step 10 - Audit Event: Write audit_event: action='sentinel_onboarded', actor_type='SENTINEL_ONBOARDING', actor_id=did, target_type='sentinel', target_id=sentinel_id, summary={ service_id, role, env, token_jti }. Also write: action='enrollment_token_consumed', actor_id=did, target_id=token_id.",
+      "Step 11 - Rate Limiting and Anti-Flood: Rate limit POST /api/v1/sentinels/onboard: 5 attempts per token_jti (rejects flood). Redis key: ratelimit:onboard:{jti}, TTL=600. Additionally: 50 total onboarding attempts per client IP per 10 minutes. Return 429 with proper error on exceed.",
+      "Step 12 - Idempotency Key Support: Client may send Idempotency-Key: <uuid4> header. Cache the onboarding response keyed by Idempotency-Key in Redis (TTL 10 minutes). Return cached response on duplicate. Prevents double-registration from network retries after server already committed."
+    ],
+    "project_structure": {
+      "files": {
+        "services/discovery/src/discovery/api/v1/routers/sentinels.py": "Onboarding and sentinel management endpoints",
+        "services/discovery/src/discovery/services/onboarding_service.py": "Full onboarding business logic",
+        "services/discovery/src/discovery/services/did_verification.py": "DID resolution and PoP signature verification",
+        "services/discovery/src/discovery/repositories/nonce_store.py": "Redis-backed nonce store (one-time use)",
+        "services/discovery/src/discovery/schemas/onboarding.py": "Request/response Pydantic schemas for onboarding"
+      }
+    },
+    "domain_entities": [
+      {
+        "name": "OnboardingChallengeRequest",
+        "type": "Pydantic model",
+        "fields": [
+          { "name": "enrollment_token", "type": "str", "required": true, "description": "Raw JWT enrollment token" },
+          { "name": "did", "type": "str", "required": true, "pattern": "^did:(key|web):[a-zA-Z0-9._\\-:]+$" }
+        ]
+      },
+      {
+        "name": "OnboardingProofRequest",
+        "type": "Pydantic model",
+        "fields": [
+          { "name": "enrollment_token", "type": "str", "required": true },
+          { "name": "did", "type": "str", "required": true },
+          { "name": "proof", "type": "object", "required": true, "structure": {
+            "type": "string (e.g. Ed25519Signature2020)",
+            "created": "ISO-8601 timestamp",
+            "challenge_nonce": "string (must match issued challenge)",
+            "proof_value": "base64url-encoded signature over canonical PoP payload"
+          }}
+        ]
+      },
+      {
+        "name": "OnboardingBundle",
+        "type": "Pydantic response model",
+        "fields": [
+          { "name": "sentinel_id", "type": "UUID" },
+          { "name": "did", "type": "str" },
+          { "name": "role", "type": "str" },
+          { "name": "env", "type": "str" },
+          { "name": "config_version", "type": "int" },
+          { "name": "discovery", "type": "object", "structure": { "sync_url": "str", "credentials_url": "str" } },
+          { "name": "chain", "type": "object", "structure": { "network": "str", "rpc_urls": "list[str]", "contract_addresses": "object" } },
+          { "name": "revocation", "type": "object", "structure": { "delta_seconds": "int" } },
+          { "name": "credentials", "type": "object", "structure": { "sentinel_identity": "str (JWT-VC) or null", "credentials_pending": "bool" } }
+        ]
+      }
+    ],
+    "api_endpoints": [
+      {
+        "method": "POST",
+        "path": "/api/v1/sentinels/onboard",
+        "auth": "mTLS required + valid enrollment token",
+        "phase": "1 - Challenge",
+        "request": {
+          "enrollment_token": "<raw_jwt>",
+          "did": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
+        },
+        "response_200": {
+          "challenge_nonce": "aBcD3FgH7kMnPqRsTuVwXyZ01234567",
+          "challenge_expires_at": "2024-01-15T10:02:00Z"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/sentinels/onboard",
+        "auth": "mTLS required + valid enrollment token",
+        "phase": "2 - Proof submission",
+        "request": {
+          "enrollment_token": "<raw_jwt>",
+          "did": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+          "proof": {
+            "type": "Ed25519Signature2020",
+            "created": "2024-01-15T10:01:30Z",
+            "challenge_nonce": "aBcD3FgH7kMnPqRsTuVwXyZ01234567",
+            "proof_value": "z3FXJa..."
+          }
+        },
+        "response_201": {
+          "sentinel_id": "a1b2c3d4-...",
+          "did": "did:key:z6Mk...",
+          "role": "producer",
+          "env": "prod",
+          "config_version": 1,
+          "discovery": { "sync_url": "https://discovery.example.gov/api/v1/sentinels/{id}", "credentials_url": "https://discovery.example.gov/api/v1/sentinels/{id}/credentials" },
+          "chain": { "network": "sepolia", "rpc_urls": ["https://rpc.example.gov"], "contract_addresses": { "issuer_registry": "0x...", "status_registry": "0x..." } },
+          "revocation": { "delta_seconds": 300 },
+          "credentials": { "sentinel_identity": "<jwt_vc>", "credentials_pending": false }
+        }
+      }
+    ],
+    "error_handling": [
+      { "condition": "Token JWT signature invalid", "status": 401, "code": "INVALID_TOKEN_SIGNATURE", "message": "Enrollment token signature verification failed" },
+      { "condition": "Token expired", "status": 401, "code": "TOKEN_EXPIRED", "message": "Enrollment token has expired" },
+      { "condition": "Token status not APPROVED", "status": 403, "code": "TOKEN_NOT_APPROVED", "message": "Enrollment token has not been approved" },
+      { "condition": "DID PoP signature invalid", "status": 401, "code": "INVALID_DID_PROOF", "message": "DID proof-of-possession signature verification failed" },
+      { "condition": "challenge_nonce expired or not found", "status": 401, "code": "NONCE_EXPIRED", "message": "Challenge nonce expired or already used. Request a new challenge." },
+      { "condition": "Token already consumed (concurrent attempt)", "status": 409, "code": "ENROLLMENT_ALREADY_CONSUMED", "message": "This enrollment token has already been used" },
+      { "condition": "unsupported DID method", "status": 422, "code": "UNSUPPORTED_DID_METHOD", "message": "Only did:key and did:web are supported in this environment" },
+      { "condition": "rate limit exceeded", "status": 429, "code": "RATE_LIMIT_EXCEEDED", "message": "Too many onboarding attempts. Retry after 60s" }
+    ],
+    "security_constraints": [
+      "mTLS enforced at reverse proxy/load balancer level for this endpoint; requests without client cert rejected with 400",
+      "Challenge nonce stored in Redis with TTL=120s; deleted on first use — one-time, cannot be replayed",
+      "PoP payload signed by sentinel must include jti + did + challenge_nonce + iat. Any of these missing → reject",
+      "iat in PoP must be within 30 seconds of server time — reject stale proofs to prevent delayed replay",
+      "Enrollment token raw value never logged — only jti is logged in audit events",
+      "Token consumption is atomic (SELECT FOR UPDATE) — concurrent onboarding with same token → exactly one succeeds",
+      "Idempotency-Key caching prevents accidental double-registration from network retries"
+    ],
+    "interface_contracts": {
+      "enrollment_tokens_repository": {
+        "consume_atomic": "consume_atomic(session: AsyncSession, jti: str) -> EnrollmentToken | raises TokenAlreadyConsumedError | raises TokenNotFoundError"
+      },
+      "did_verification_service": {
+        "verify_pop": "verify_pop(did: str, pop_payload: dict, proof_value: str) -> bool | raises DIDResolutionError | raises InvalidSignatureError"
+      },
+      "nonce_store": {
+        "issue_nonce": "issue_nonce(jti: str, ttl_seconds: int) -> str",
+        "consume_nonce": "consume_nonce(jti: str, provided_nonce: str) -> bool (False if not found or mismatch)"
+      }
+    }
+  },
+  "dependencies": ["TASK-022", "TASK-025", "TASK-011"],
+  "acceptance_criteria": [
+    "Onboarding with invalid/expired/not-approved token returns 401/403 with correct error code",
+    "Onboarding with invalid DID PoP signature returns 401 INVALID_DID_PROOF",
+    "Two concurrent onboarding requests with the same token — exactly one returns 201, the other returns 409",
+    "Onboarding with a replayed challenge nonce returns 401 NONCE_EXPIRED",
+    "Idempotent re-submission with same Idempotency-Key returns cached 201 response without re-executing",
+    "sentinel_id and did appear in audit_events after successful onboarding",
+    "Returned bundle contains all chain contract addresses and revocation delta"
+  ]
+}

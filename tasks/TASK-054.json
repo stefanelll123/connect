@@ -1,0 +1,89 @@
+{
+  "id": "TASK-054",
+  "title": "Sentinel UI: Minimal Local Web Interface (DID info, VC summary, health dashboard, log viewer)",
+  "component": "sentinel/ui",
+  "status": "pending",
+  "description": "Implement a minimal local web UI for the sentinel, served at /ui, using FastAPI with Jinja2 templates and minimal static assets (no heavy frontend framework). The UI surfaces essential operational information: the sentinel's DID identity, active Verifiable Credentials (summary view), health and sync status, and recently logged events from TASK-051's ring buffer. The UI is intentionally minimal — no full VC payload display by default (expandable with warning), no mutation endpoints (use CLI for key rotation). Served only on localhost by default.",
+  "objectives": [
+    "Implement /ui router in FastAPI with Jinja2 templates",
+    "Page /ui/did: DID string and Ed25519 public key fingerprint",
+    "Page /ui/credentials: list active VCs (type, exp, aud, env, statusListId) — no full payload by default",
+    "Page /ui/health: uptime, config bundle version/age, credential sync status, chain cache age, Δ staleness",
+    "Page /ui/logs: last 100 events from LogRingBuffer with PERMIT/DENY filter",
+    "Bind UI to 127.0.0.1 only by default (SENTINEL_UI_HOST env override)"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      {
+        "step": 1,
+        "title": "Create UI module structure",
+        "detail": "Create `sentinel/ui/` package. Register `ui_router = APIRouter(prefix='/ui', tags=['ui'])` and include in the app created by `create_app()` (TASK-037). Templates directory: `sentinel/ui/templates/` using Jinja2. Static files: `sentinel/ui/static/` with minimal CSS (no framework — use inline styles or tiny hand-written CSS). No JavaScript frameworks (React, Vue) — plain JS for expandable VC sections only. All pages return full HTML (not SPA). Mount static files: `app.mount('/ui/static', StaticFiles(directory='sentinel/ui/static'))`. Serve only if `SENTINEL_UI_ENABLED=true` (default true in local mode, false in K8s prod by default)."
+      },
+      {
+        "step": 2,
+        "title": "Page /ui/did — Identity information",
+        "detail": "Route: `GET /ui/did`. Template: `did.html`. Context: `{did: str, key_fingerprint: str, service_id: str, env: str, instance_id: str, role: str}`. `key_fingerprint` = `sha256(public_key_bytes).hexdigest()[:16]` — NOT the public key itself (prevents key material exposure). Display: styled card with DID, fingerprint, service_id, env, role, instance_id, and uptime. Add a copy-to-clipboard button (vanilla JS, copy DID string). Note on page: 'This DID is your sentinel identity. Share it with Discovery administrators for enrollment.'"
+      },
+      {
+        "step": 3,
+        "title": "Page /ui/credentials — VC summary",
+        "detail": "Route: `GET /ui/credentials`. Template: `credentials.html`. Fetch credentials from `CredentialStore` (TASK-038) — summary only: `{type, issuer_did_hash (8 chars), exp, aud, env, status_list_id, status: active|expired|revoked}`. Render as an HTML table with columns: Type, Expires, Audience, Env, Status. Do NOT render full JWT. Add expandable section (HTML `<details>` element, no JS required) showing: `{issuer_did_hash, jti_hash (8 chars), nbf}`. Show warning inside expanded section: 'Extended credential metadata. Do not share this page content externally.' Sort by exp ascending (soonest expiry first = most urgent to renew)."
+      },
+      {
+        "step": 4,
+        "title": "Page /ui/health — Operational status",
+        "detail": "Route: `GET /ui/health` (NOT the same as API `/health/live` or `/health/ready`). Template: `health.html`. Gather data from app state: `{uptime_seconds, config_bundle_version, config_bundle_age_seconds, last_credential_sync_at, credential_count, chain_cache_age_seconds, revocation_delta_seconds, revocation_staleness_seconds, trust_layer_status: ok|stale|unavailable, policy_version, policy_rule_count, instance_id, sentinel_did_hash}`. Color-code status indicators: green (all ok), yellow (stale > Δ/2), red (unavailable or stale > Δ). Refresh the page every 30s via `<meta http-equiv='refresh' content='30'>`."
+      },
+      {
+        "step": 5,
+        "title": "Page /ui/logs — Recent events",
+        "detail": "Route: `GET /ui/logs?decision=&service_id=`. Template: `logs.html`. Fetch last 100 events from `LogRingBuffer.get_recent(n=100, filter_decision=request.query_params.get('decision'), filter_service_id=request.query_params.get('service_id'))`. Render as HTML table: ts, direction, decision (colored: PERMIT=green, DENY=red), error_code, service_id, latency_ms, jti_hash (8 chars). Add filter form at top: dropdowns for decision (All/PERMIT/DENY) and service_id. Include link to live stream: 'View live log stream →' pointing to TASK-055 endpoint. Log entries are pre-redacted by SentinelLogger — no further redaction needed at display layer."
+      },
+      {
+        "step": 6,
+        "title": "Navigation and layout template",
+        "detail": "Create `base.html` Jinja2 template with: (1) Top navigation bar with links: DID, Credentials, Health, Logs, Live Stream. (2) Breadcrumb showing current page. (3) Footer: 'Sentinel UI — internal only. Do not expose to public networks.'. (4) CSP header via middleware: `Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:`. The `'unsafe-inline'` for script is acceptable given this is a localhost-only page — do not add complex nonce-based CSP for this minimal UI."
+      },
+      {
+        "step": 7,
+        "title": "Bind to localhost by default",
+        "detail": "In `sentinel/core/config.py`: `SENTINEL_UI_HOST = os.getenv('SENTINEL_UI_HOST', '127.0.0.1')`. Pass to uvicorn via: `uvicorn.run(app, host=SENTINEL_UI_HOST, port=SENTINEL_PORT)`. If `SENTINEL_UI_HOST` is set to `0.0.0.0` in config: log WARNING at startup: `event=ui_exposed_on_all_interfaces host=0.0.0.0. Ensure network access control is in place.`. For Kubernetes: UI is served on the pod's loopback only; use `kubectl port-forward` for access. Document in TASK-049 runbook."
+      },
+      {
+        "step": 8,
+        "title": "Tests",
+        "detail": "Test file: `tests/unit/ui/test_ui_pages.py`. Using `httpx.AsyncClient(app=app, base_url='http://test')` (ASGI test client). Cases: (1) GET /ui/did returns 200 HTML with DID string; (2) GET /ui/credentials returns table without full JWT content; (3) GET /ui/health returns 200 with health fields; (4) GET /ui/logs returns last 100 events; (5) filter GET /ui/logs?decision=deny returns only deny events; (6) no private key bytes appear in any page response; (7) no Authorization header values appear in any page response. Assert rendered HTML with BeautifulSoup."
+      }
+    ]
+  },
+  "project_structure": {
+    "files": {
+      "sentinel/ui/__init__.py": "UI module init",
+      "sentinel/ui/router.py": "ui_router with all page routes",
+      "sentinel/ui/templates/base.html": "Base layout with navigation",
+      "sentinel/ui/templates/did.html": "DID identity page",
+      "sentinel/ui/templates/credentials.html": "VC summary page",
+      "sentinel/ui/templates/health.html": "Health dashboard page",
+      "sentinel/ui/templates/logs.html": "Log viewer page",
+      "sentinel/ui/static/style.css": "Minimal CSS stylesheet",
+      "tests/unit/ui/test_ui_pages.py": "UI page tests with ASGI test client"
+    }
+  },
+  "security_constraints": [
+    "UI binds to 127.0.0.1 by default — exposing to 0.0.0.0 requires explicit env var with WARNING log",
+    "No full JWT or VC payload rendered in default view (only in hidden expand section with warning)",
+    "CSP headers prevent external script injection — default-src 'self'",
+    "No mutation endpoints in UI — key rotation, enrollment, and revocation only via sentinelctl CLI",
+    "DID displayed in full (needed for identity verification) but private key material never displayed",
+    "X-Frame-Options: DENY header set to prevent clickjacking on UI pages"
+  ],
+  "dependencies": ["TASK-051", "TASK-052", "TASK-037"],
+  "acceptance_criteria": [
+    "All 4 UI pages render without errors with populated mock sentinel state",
+    "No private key or raw JWT appears in any rendered HTML response",
+    "Log filter by decision correctly returns only matching events",
+    "Health page shows correct color-coding based on staleness thresholds",
+    "UI is not accessible from 0.0.0.0 without explicit env override",
+    "CSP and X-Frame-Options headers present on all UI responses"
+  ]
+}

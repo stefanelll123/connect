@@ -1,0 +1,106 @@
+{
+  "id": "TASK-012",
+  "title": "Observability Infrastructure: OpenTelemetry, Prometheus Metrics, and Grafana Alloy Integration",
+  "component": "infrastructure",
+  "status": "not-started",
+  "description": "Implement a shared observability layer in libs/common/telemetry/ that all services (Discovery and Sentinel) import. Covers: structured logging with trace correlation, OpenTelemetry traces (OTLP export), Prometheus metrics, and Grafana Alloy configuration for log/metric collection. Promtail must NOT be used — it reached End-of-Life on March 2, 2026. Use Grafana Alloy instead.",
+  "objectives": [
+    "Unified telemetry setup across all services with a single init call",
+    "All logs are structured (JSON), include trace_id and span_id for correlation",
+    "Traces exported to OTel Collector via OTLP HTTP",
+    "Prometheus metrics accessible at /metrics endpoint on each service",
+    "Grafana Alloy collects logs from Docker containers and forwards to Loki"
+  ],
+  "implementation_guidance": {
+    "overview": "libs/common/telemetry/ provides: setup_telemetry(service_name, version, settings) — call once at startup. setup_logging() — configure structlog with JSON formatter and OTel trace injection. get_tracer(name) and get_meter(name) — wrappers around OTel SDK. Prometheus metrics via prometheus_client or opentelemetry-sdk with PrometheusExporter.",
+    "steps": [
+      "Step 1 - TelemetrySettings Pydantic Model: Fields: service_name: str, service_version: str = '0.0.0', otel_endpoint: AnyHttpUrl = 'http://localhost:4318' (OTEL_EXPORTER_OTLP_ENDPOINT), otel_enabled: bool = True, log_level: str = 'INFO', prometheus_enabled: bool = True, prometheus_port: int = 9090 (optional separate server or use /metrics on main app).",
+      "Step 2 - OTel Tracer Setup: Use opentelemetry-sdk. OTLPSpanExporter(endpoint=settings.otel_endpoint + '/v1/traces'). Resource attributes: service.name, service.version, deployment.environment. BatchSpanProcessor. TracerProvider registered as global. Instrument FastAPI with FastAPIInstrumentor.instrument() and httpx with HTTPXClientInstrumentor.instrument(). SQLAlchemy: AsyncEngineInstrumentor.instrument().",
+      "Step 3 - OTel Metrics Setup: MeterProvider with OTLPMetricExporter(endpoint + '/v1/metrics'). PeriodicExportingMetricReader (interval 30s). For Prometheus: add PrometheusMetricReader to expose /metrics via prometheus_client HTTP server (run in background thread) or mount on FastAPI app.",
+      "Step 4 - Structured Logging with structlog: Use structlog 24.x. Configure: structlog.configure(processors=[structlog.contextvars.merge_contextvars, structlog.stdlib.add_log_level, structlog.stdlib.add_logger_name, add_otel_trace_context (custom processor), structlog.processors.TimeStamper(fmt='iso'), structlog.processors.JSONRenderer()]). The add_otel_trace_context processor reads current span's trace_id and span_id and injects them as log fields.",
+      "Step 5 - add_otel_trace_context Processor: from opentelemetry import trace; span = trace.get_current_span(); if span.is_recording(): ctx = span.get_span_context(); inject trace_id = format(ctx.trace_id, '032x'); span_id = format(ctx.span_id, '016x') into the event dict.",
+      "Step 6 - FastAPI Middleware Integration: RequestLoggingMiddleware: before handler, structlog.contextvars.clear_contextvars(), bind request_id (from X-Request-ID header or generate UUID4), method, path. After handler, log response_time_ms and status_code. This middleware ensures all logs within a request share the same context.",
+      "Step 7 - Standard Counters and Histograms: Define in common/telemetry/metrics.py: http_requests_total (counter, labels: method, path, status_code), http_request_duration_seconds (histogram, labels: method, path), sentinel_vc_validations_total (counter, labels: result=valid|invalid|expired), sentinel_replay_cache_hits_total (counter), sentinel_active_instances (gauge). All metrics use the service name as prefix.",
+      "Step 8 - Grafana Alloy Configuration (deploy/alloy/config.alloy): Use River syntax (Alloy native config). Define: discovery.docker component to discover running containers. loki.source.docker component to tail container logs. loki.write component pointing to Loki at http://loki:3100. Add labels: {job='docker', container=component.label}. Do NOT use Promtail — Alloy replaces it.",
+      "Step 9 - Grafana Alloy Docker Service: Add to docker-compose.yaml: image: grafana/alloy:v1.2.0. Volumes: /var/run/docker.sock:/var/run/docker.sock:ro, ./deploy/alloy/config.alloy:/etc/alloy/config.alloy. Command: alloy run /etc/alloy/config.alloy. Add Loki and Grafana services to docker-compose as well (separate from main stack, in docker-compose.observability.yaml profile).",
+      "Step 10 - setup_telemetry() Entry Point: Single function in common/telemetry/__init__.py that configures all of the above. Called in services' main.py or app.py before creating FastAPI app. Accepts TelemetrySettings. Returns (tracer, meter) tuple."
+    ],
+    "project_structure": {
+      "files": {
+        "libs/common/src/common/telemetry/__init__.py": "setup_telemetry, get_tracer, get_meter exports",
+        "libs/common/src/common/telemetry/settings.py": "TelemetrySettings Pydantic model",
+        "libs/common/src/common/telemetry/tracing.py": "OTel tracer setup",
+        "libs/common/src/common/telemetry/metrics.py": "OTel meter + Prometheus metrics definitions",
+        "libs/common/src/common/telemetry/logging.py": "structlog configuration + add_otel_trace_context",
+        "libs/common/src/common/telemetry/middleware.py": "FastAPI RequestLoggingMiddleware",
+        "deploy/otel-collector-config.yaml": "OTel Collector configuration",
+        "deploy/alloy/config.alloy": "Grafana Alloy log collection configuration",
+        "docker-compose.observability.yaml": "Loki + Grafana + Alloy services (optional profile)"
+      }
+    },
+    "domain_entities": [
+      {
+        "name": "TelemetrySettings",
+        "type": "Pydantic BaseSettings",
+        "fields": [
+          {"name": "service_name", "type": "str"},
+          {"name": "service_version", "type": "str", "default": "0.0.0"},
+          {"name": "otel_endpoint", "type": "str", "env": "OTEL_EXPORTER_OTLP_ENDPOINT", "default": "http://localhost:4318"},
+          {"name": "otel_enabled", "type": "bool", "default": true},
+          {"name": "log_level", "type": "str", "default": "INFO"},
+          {"name": "prometheus_enabled", "type": "bool", "default": true}
+        ]
+      }
+    ],
+    "data_structures": {
+      "structured_log_entry": {
+        "timestamp": "2024-01-15T10:30:00.123Z",
+        "level": "INFO",
+        "logger": "discovery.api.sentinels",
+        "event": "sentinel_registered",
+        "service_id": "sentinel-alpha",
+        "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+        "span_id": "00f067aa0ba902b7",
+        "request_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+        "duration_ms": 45.2
+      },
+      "prometheus_metrics_example": [
+        "# HELP http_requests_total Total HTTP requests",
+        "# TYPE http_requests_total counter",
+        "http_requests_total{method=\"POST\",path=\"/api/v1/sentinels\",status_code=\"201\"} 42",
+        "# HELP http_request_duration_seconds HTTP request duration",
+        "# TYPE http_request_duration_seconds histogram",
+        "http_request_duration_seconds_bucket{method=\"POST\",path=\"/api/v1/sentinels\",le=\"0.1\"} 38"
+      ]
+    },
+    "security_constraints": [
+      "Logs MUST NOT contain: private keys, secret values, raw tokens, credential payloads — use log field sanitizers",
+      "OTel spans MUST sanitize span attributes — DID private keys, VP JWT payloads must never be span attributes",
+      "Prometheus /metrics endpoint MUST be firewalled — not exposed publicly; internal network only",
+      "structlog processor chain MUST include a sanitize_sensitive_fields processor before JSONRenderer",
+      "Request bodies MUST NOT be logged by default — opt-in only via DEBUG_LOG_REQUEST_BODY=1 flag in dev env"
+    ]
+  },
+  "technical_requirements": [
+    "opentelemetry-sdk >= 1.24.0",
+    "opentelemetry-exporter-otlp-proto-http >= 1.24.0",
+    "opentelemetry-instrumentation-fastapi >= 0.45b0",
+    "opentelemetry-instrumentation-httpx >= 0.45b0",
+    "opentelemetry-instrumentation-sqlalchemy >= 0.45b0",
+    "prometheus-client >= 0.20.0",
+    "structlog >= 24.1.0",
+    "Grafana Alloy v1.2+ (NOT Promtail — EOL March 2, 2026)"
+  ],
+  "dependencies": [
+    "TASK-009",
+    "TASK-010"
+  ],
+  "acceptance_criteria": [
+    "setup_telemetry() can be imported and called from both services",
+    "Log output is valid JSON with trace_id and span_id fields on every line when a request is in flight",
+    "GET /metrics returns Prometheus format metrics from any service",
+    "OTel Collector receives spans and logs from services when running via docker compose",
+    "Grafana Alloy config.alloy is valid River syntax (alloy fmt passes)",
+    "No private key or VC payload appears in any log or span attribute in tests"
+  ]
+}

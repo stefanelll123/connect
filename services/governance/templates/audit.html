@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}Audit Log — Governance Admin{% endblock %}
+{% block content %}
+
+<div class="d-flex align-items-center mb-3">
+  <h4 class="fw-bold mb-0"><i class="bi bi-list-check me-2 text-secondary"></i>Audit Log</h4>
+  <span class="badge bg-secondary ms-2">{{ entries | length }} entries</span>
+</div>
+
+<div class="card">
+  <div class="table-responsive">
+    <table class="table table-sm table-hover align-middle mb-0">
+      <thead class="table-light">
+        <tr>
+          <th style="width:40px">#</th>
+          <th>Timestamp</th>
+          <th>Action</th>
+          <th>Entity</th>
+          <th>Details</th>
+          <th>TX / Error</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for e in entries %}
+        <tr {% if e.status == 'error' %}class="table-danger"{% endif %}>
+          <td class="text-muted small">{{ e.id }}</td>
+          <td class="small text-muted" style="white-space:nowrap">{{ e.created_at[:19] }}</td>
+          <td><code class="small">{{ e.action }}</code></td>
+          <td>
+            {% if e.entity_type %}
+              <span class="badge bg-light text-dark border me-1" style="font-size:.75em">{{ e.entity_type }}</span>
+            {% endif %}
+            {% if e.entity_id %}
+              <span class="mono small d-inline-block" style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle;" title="{{ e.entity_id }}">
+                {{ e.entity_id }}
+              </span>
+            {% endif %}
+          </td>
+          <td class="small text-muted" style="max-width:220px;">
+            {% if e.details %}
+              <span title="{{ e.details }}">
+                {{ e.details[:90] }}{% if e.details | length > 90 %}…{% endif %}
+              </span>
+            {% endif %}
+          </td>
+          <td>
+            {% if e.tx_hash %}
+              <a href="http://localhost:5100/tx/{{ e.tx_hash }}" target="_blank" class="tx-link" title="{{ e.tx_hash }}">
+                {{ e.tx_hash[:16] }}…
+              </a>
+            {% elif e.error_msg %}
+              <span class="text-danger small" title="{{ e.error_msg }}">
+                {{ e.error_msg[:70] }}{% if e.error_msg | length > 70 %}…{% endif %}
+              </span>
+            {% else %}
+              —
+            {% endif %}
+          </td>
+          <td>
+            {% if e.status == 'success' %}
+              <span class="badge bg-success">ok</span>
+            {% elif e.status == 'error' %}
+              <span class="badge bg-danger">error</span>
+            {% else %}
+              <span class="badge bg-secondary">{{ e.status }}</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% else %}
+        <tr>
+          <td colspan="7" class="text-center text-muted py-5">
+            <i class="bi bi-list-check fs-3 d-block mb-2 opacity-25"></i>
+            No audit entries yet.
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{% endblock %}

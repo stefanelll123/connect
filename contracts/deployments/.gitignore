@@ -1,0 +1,8 @@
+# Allow ABI/address JSON deployment artifacts
+!*.json
+
+# Exclude private keys and secrets that must never be committed
+*.key
+*.pem
+*.secret
+*private*

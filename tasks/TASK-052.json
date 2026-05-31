@@ -1,0 +1,80 @@
+{
+  "id": "TASK-052",
+  "title": "Sentinel: OpenTelemetry Instrumentation + Prometheus Metrics (Gateway KPIs and Security KPIs)",
+  "component": "sentinel/libs/common/telemetry",
+  "status": "pending",
+  "description": "Instrument the sentinel with full OpenTelemetry tracing and Prometheus metrics, covering both gateway KPIs (request rates, upstream latency, error rates) and security-specific KPIs (deny reason breakdown, replay hits, revocation staleness, chain cache misses). Use FastAPI auto-instrumentation combined with manual spans for the key pipeline stages. Export traces via OTLP and expose Prometheus metrics at /metrics. Configure per-environment sampling to manage trace volume.",
+  "objectives": [
+    "Auto-instrument FastAPI with FastAPIInstrumentor and HTTPX client with HTTPXClientInstrumentor",
+    "Add manual OTel spans for: resolve_descriptor, build_vp, verify_proof, verify_vc, check_revocation, policy_evaluate, proxy_upstream",
+    "Expose /metrics Prometheus endpoint with full metrics catalogue (18 metrics)",
+    "Gateway KPIs: inbound_requests_total, outbound_requests_total, upstream_latency histograms",
+    "Security KPIs: denies_total{reason}, replay_rejects_total, status_stale_total, chain_cache_miss_total",
+    "Configure OTLP sampling: 100% in dev, 10% in prod (configurable)"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      {
+        "step": 1,
+        "title": "OTel SDK setup and auto-instrumentation",
+        "detail": "In `libs/common/telemetry/otel.py`, function `setup_tracing(service_name, instance_id, env, otlp_endpoint)`. Steps: (1) Create `Resource` with attributes: `service.name=service_name`, `service.instance.id=instance_id`, `deployment.environment=env`, `sentinel.role=producer|consumer`. (2) Create `BatchSpanExporter` with `OTLPSpanExporter(endpoint=otlp_endpoint)` if endpoint configured, else `ConsoleSpanExporter` in dev. (3) Configure `ParentBasedTraceIdRatioBased` sampler: ratio from `OTEL_TRACES_SAMPLE_RATE` env (default: 1.0 dev, 0.1 prod). (4) `FastAPIInstrumentor().instrument_app(app)`. (5) `HTTPXClientInstrumentor().instrument()`. (6) `SQLAlchemyInstrumentor().instrument()` if sentinel uses any SQLAlchemy (for future local DB)."
+      },
+      {
+        "step": 2,
+        "title": "Manual spans for pipeline stages",
+        "detail": "In each pipeline stage (TASK-044, TASK-045), wrap key operations with manual spans using context managers: `with tracer.start_as_current_span('sentinel.pipeline.verify_proof') as span: span.set_attribute('service_id', service_id); ...`. Span names and attributes: (1) `sentinel.resolve_descriptor` attrs: `service_id`, `cache_hit: bool`; (2) `sentinel.build_vp` attrs: `vc_count`, `aud`; (3) `sentinel.verify_proof` attrs: `result: ok|fail`, `fail_code`; (4) `sentinel.verify_vc` loop for each VC: `issuer_did_prefix` (first 8 chars only); (5) `sentinel.check_revocation` attrs: `stale: bool`, `result: ok|revoked|stale`; (6) `sentinel.policy_evaluate` attrs: `decision: permit|deny`, `rule_id`; (7) `sentinel.proxy_upstream` attrs: `endpoint_url` (path only, no query), `upstream_status_code`."
+      },
+      {
+        "step": 3,
+        "title": "Define Prometheus metrics catalogue",
+        "detail": "In `libs/common/telemetry/metrics.py`. All metrics use label `sentinel_role=producer|consumer, service_id, env`. Full catalogue: (1) `sentinel_inbound_requests_total{decision,error_code}` Counter; (2) `sentinel_outbound_requests_total{service_id,status_class}` Counter (2xx, 4xx, 5xx, timeout); (3) `sentinel_inbound_request_duration_seconds{stage}` Histogram (buckets: 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0); (4) `sentinel_upstream_latency_seconds` Histogram; (5) `sentinel_denies_total{reason}` Counter — reason from ProofErrorCode/PolicyDecisionType; (6) `sentinel_replay_rejects_total` Counter; (7) `sentinel_replay_cache_fallback_total` Counter; (8) `sentinel_revocation_stale_total` Counter; (9) `sentinel_chain_rpc_errors_total{method}` Counter; (10) `sentinel_chain_cache_miss_total{cache_type}` Counter; (11) `sentinel_trust_layer_unavailable_total` Counter; (12) `sentinel_vc_verifications_total{result}` Counter; (13) `sentinel_credential_sync_lag_seconds` Gauge; (14) `sentinel_policy_evaluate_total{decision}` Counter; (15) `sentinel_descriptor_cache_misses_total` Counter; (16) `sentinel_active_connections` Gauge (current in-flight requests); (17) `sentinel_emergency_revocation_checks_total{result}` Counter; (18) `sentinel_key_rotation_total` Counter."
+      },
+      {
+        "step": 4,
+        "title": "Expose GET /metrics endpoint",
+        "detail": "Register `/metrics` route in FastAPI app (both producer and consumer). Uses `prometheus_client.make_asgi_app()` mounted at `/metrics`. Protect endpoint: `/metrics` should NOT require SentinelProof auth (it's scraped by Prometheus, not by consumers). However, bind it to the same port as mgmt/health endpoints, optionally restrict to pod-internal network via Kubernetes NetworkPolicy. No authentication on /metrics is standard Prometheus practice — security via network policy, not application auth."
+      },
+      {
+        "step": 5,
+        "title": "OTel log bridge",
+        "detail": "Call `LoggingInstrumentor().instrument(set_logging_format=True)` to bridge Python log records to OTel. This enables trace_id and span_id to be automatically injected into structured log output from SentinelLogger (TASK-051). Set `OTEL_PYTHON_LOG_CORRELATION=true` via env. This allows Grafana to correlate traces with Loki logs by trace_id."
+      },
+      {
+        "step": 6,
+        "title": "Sampling and environment configuration",
+        "detail": "Config via env vars: `OTEL_TRACES_SAMPLE_RATE=1.0` (dev default), `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317` (gRPC), `OTEL_EXPORTER_OTLP_HEADERS=''` (for auth tokens if required by collector). Add `SENTINEL_METRICS_ENABLED=true` (default true) flag to disable all metrics in test environments to avoid cardinality issues. In test: use `PROMETHEUS_MULTIPROC_DIR` if running multiple workers."
+      },
+      {
+        "step": 7,
+        "title": "Tests and validation",
+        "detail": "Test file: `tests/unit/telemetry/test_metrics.py`. Cases: (1) inbound_requests_total counter incremented on request; (2) denies_total{reason='REPLAY_DETECTED'} increments on replay; (3) pipeline stage histogram records latency > 0; (4) /metrics endpoint returns 200 with text/plain content-type; (5) OTel span names match expected catalogue; (6) trace_id present in log output after OTel setup. Use `opentelemetry-sdk` `InMemorySpanExporter` for span assertions. Use `prometheus_client.REGISTRY.get_sample_value()` to assert counter values."
+      }
+    ]
+  },
+  "project_structure": {
+    "files": {
+      "libs/common/telemetry/__init__.py": "Exports setup_tracing, setup_metrics, get_tracer, get_meter",
+      "libs/common/telemetry/otel.py": "OTel SDK setup and auto-instrumentation",
+      "libs/common/telemetry/metrics.py": "All 18 Prometheus metric definitions",
+      "sentinel/producer/routes/metrics.py": "GET /metrics route",
+      "sentinel/consumer/routes/metrics.py": "GET /metrics route",
+      "tests/unit/telemetry/test_metrics.py": "Metrics and tracing validation tests"
+    }
+  },
+  "security_constraints": [
+    "Span attributes must never store full DID, full jti, or JWT content — only truncated hashes and boolean flags",
+    "/metrics endpoint restricted to internal network via Kubernetes NetworkPolicy — not exposed to external traffic",
+    "OTel export must use TLS to OTLP endpoint in prod — configure via OTEL_EXPORTER_OTLP_CERTIFICATE env var",
+    "Sample rate in prod should be < 100% — trace payload may contain sensitive path/endpoint metadata",
+    "Metric label cardinality must be bounded — service_id and error_code are safe; never use jti or DID as metric labels"
+  ],
+  "dependencies": ["TASK-012", "TASK-037", "TASK-045", "TASK-046", "TASK-050"],
+  "acceptance_criteria": [
+    "All 18 metrics defined and correctly incremented in integration test scenarios",
+    "Manual spans produced for all 7 pipeline stages",
+    "GET /metrics returns valid Prometheus text format",
+    "trace_id injected into structured logs when tracing active",
+    "Sampling rate applied correctly (configurable without code change)",
+    "No DID or jti values present as Prometheus label values"
+  ]
+}

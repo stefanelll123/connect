@@ -1,0 +1,76 @@
+{
+  "id": "TASK-016",
+  "title": "StatusRegistry Smart Contract: VC Revocation Anchoring On-Chain",
+  "component": "contracts",
+  "status": "not-started",
+  "description": "Implement the StatusRegistry Solidity contract. This contract stores cryptographic anchors (SHA-256 hashes) of Bitstring Status List Credentials published by issuers. Sentinel nodes use this contract to verify that the status list they have cached is genuine and has not been tampered with. It does NOT store the full bitstring — only the hash and metadata.",
+  "objectives": [
+    "Immutable on-chain anchoring of status list credentials",
+    "Support per-issuer status list management",
+    "Emergency revocation of individual credentials via emit-only mechanism (off-chain indexer picks it up)",
+    "Delta (Δ) freshness parameter stored per issuer for staleness enforcement"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      "Step 1 - StatusAnchor Struct: struct StatusAnchor { bytes32 issuerDidHash; uint256 statusListIndex; bytes32 credentialHash; string statusListUrl; uint256 publishedAt; uint256 freshnessDeltaSeconds; bool active; }",
+      "Step 2 - Storage: mapping(bytes32 => StatusAnchor) private _anchors; key = keccak256(abi.encodePacked(issuerDid, statusListIndex)). mapping(bytes32 => bytes32[]) private _issuerAnchors; map issuerDidHash → array of anchor keys.",
+      "Step 3 - Events: event StatusAnchorPublished(bytes32 indexed issuerDidHash, uint256 indexed statusListIndex, bytes32 credentialHash, string statusListUrl, uint256 freshnessDeltaSeconds); event EmergencyRevocationEmitted(bytes32 indexed credentialHash, string reason, address indexed revokedBy);",
+      "Step 4 - publishStatusAnchor(string calldata issuerDid, uint256 statusListIndex, bytes32 credentialHash, string calldata statusListUrl, uint256 freshnessDeltaSeconds): Validate: freshnessDeltaSeconds in range [60, 86400]. Compute anchor key. If anchor exists (update): overwrite and emit. If new: insert. Emit StatusAnchorPublished.",
+      "Step 5 - emitEmergencyRevocation(bytes32 credentialHash, string calldata reason): onlyRole(REVOCATION_ADMIN_ROLE). Emit EmergencyRevocationEmitted. NOTE: This function only emits an event — it does NOT modify contract state. The off-chain status list is updated out-of-band. Sentinel nodes subscribe to this event and immediately invalidate their cache for the affected credential.",
+      "Step 6 - Read Functions: getStatusAnchor(string calldata issuerDid, uint256 statusListIndex) returns (StatusAnchor memory). verifyStatusAnchor(string calldata issuerDid, uint256 statusListIndex, bytes32 credentialHash) returns (bool) — returns true if stored credentialHash matches. getFreshnessDelta(string calldata issuerDid, uint256 statusListIndex) returns (uint256).",
+      "Step 7 - IStatusRegistry Interface: in contracts/interfaces/IStatusRegistry.sol.",
+      "Step 8 - Access Control: ANCHOR_PUBLISHER_ROLE for publishStatusAnchor (assigned to issuer's deployment key). REVOCATION_ADMIN_ROLE for emitEmergencyRevocation (governance). DEFAULT_ADMIN_ROLE for role management.",
+      "Step 9 - Constructor: constructor(address initialAdmin, address issuerRegistry). Store issuerRegistry ref. Grant roles.",
+      "Step 10 - Freshness Validation: MIN_FRESHNESS_DELTA = 60 (seconds), MAX_FRESHNESS_DELTA = 86400 (24 hours). Enforce in publishStatusAnchor."
+    ],
+    "project_structure": {
+      "files": {
+        "contracts/contracts/Registries/StatusRegistry.sol": "Main contract",
+        "contracts/contracts/interfaces/IStatusRegistry.sol": "Interface",
+        "contracts/test/StatusRegistry.test.ts": "Hardhat tests"
+      }
+    },
+    "domain_entities": [
+      {
+        "name": "StatusAnchor",
+        "type": "Solidity struct",
+        "fields": [
+          {"name": "issuerDidHash", "type": "bytes32", "description": "keccak256(issuerDid)"},
+          {"name": "statusListIndex", "type": "uint256"},
+          {"name": "credentialHash", "type": "bytes32", "description": "SHA-256 of the full status list JWT"},
+          {"name": "statusListUrl", "type": "string", "description": "Where to fetch the status list credential"},
+          {"name": "publishedAt", "type": "uint256"},
+          {"name": "freshnessDeltaSeconds", "type": "uint256"},
+          {"name": "active", "type": "bool"}
+        ]
+      }
+    ],
+    "error_handling": {
+      "custom_errors": [
+        "error InvalidFreshnessDelta(uint256 provided, uint256 min, uint256 max);",
+        "error AnchorNotFound(bytes32 anchorKey);"
+      ]
+    },
+    "security_constraints": [
+      "freshnessDeltaSeconds enforced between 60 and 86400 — prevents disabling staleness enforcement",
+      "emitEmergencyRevocation requires REVOCATION_ADMIN_ROLE — not callable by issuers",
+      "credentialHash is SHA-256 of the full JWT — computed off-chain and verified on-chain by Sentinel",
+      "No full status list bitstring is stored on-chain — only the hash anchor (cost and privacy)"
+    ]
+  },
+  "technical_requirements": [
+    "Solidity 0.8.25",
+    "@openzeppelin/contracts 5.x"
+  ],
+  "dependencies": [
+    "TASK-013",
+    "TASK-014"
+  ],
+  "acceptance_criteria": [
+    "publishStatusAnchor stores anchor and emits StatusAnchorPublished",
+    "verifyStatusAnchor returns false if credentialHash does not match stored value",
+    "emitEmergencyRevocation emits event without state change",
+    "freshnessDeltaSeconds < 60 reverts with InvalidFreshnessDelta",
+    "Non-admin cannot call emitEmergencyRevocation"
+  ]
+}

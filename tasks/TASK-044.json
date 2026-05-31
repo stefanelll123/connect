@@ -1,0 +1,105 @@
+{
+  "id": "TASK-044",
+  "title": "Sentinel: Consumer Outbound Pipeline (full flow from local client to producer, VP attachment, retry with new jti)",
+  "component": "sentinel/consumer/pipeline",
+  "status": "pending",
+  "description": "Implement the complete consumer-side outbound request pipeline. When a local client application calls the consumer sentinel, it must: resolve the target ServiceDescriptor from Discovery (or local cache), verify the producer's descriptor signature, select the best producer endpoint (weighted round-robin with health filtering), select matching Verifiable Credentials, build a VP with producer DID as audience, build and sign the ProofClaims envelope, send the request to the producer sentinel, and handle retries by generating a fresh jti+VP per attempt. All telemetry (trace_id, correlation_id) must be propagated.",
+  "objectives": [
+    "Implement POST /outbound/{service_id}/{path:path} consumer gateway endpoint",
+    "Resolve ServiceDescriptor with in-memory cache (TTL: descriptor max_age, max 10 minutes)",
+    "Verify producer ServiceDescriptor JWS signature before trusting any endpoint",
+    "Select matching VCs (by service_id, env) from local credential store",
+    "Build VP with aud=producer_service_did and nonce=new_jti per attempt",
+    "Sign ProofClaims envelope and send to selected producer endpoint",
+    "Retry logic: up to 3 attempts, exponential backoff (0.5s, 1s, 2s), new jti+VP per attempt",
+    "Propagate trace_id and correlation_id through all hops"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      {
+        "step": 1,
+        "title": "Define the consumer gateway route",
+        "detail": "In `sentinel/consumer/routes/outbound.py`, register: `router.post('/outbound/{service_id}/{path:path}')` and `router.get('/outbound/{service_id}/{path:path}')` (support all HTTP methods via a catch-all). Handler: `async def proxy_outbound(service_id: str, path: str, request: Request)`. Extract all original headers (excluding hop-by-hop), body bytes, and query parameters. Inject into pipeline. Respond with producer's response status+body+headers (scrub internal headers from producer before returning to local client)."
+      },
+      {
+        "step": 2,
+        "title": "ServiceDescriptor resolution with cache",
+        "detail": "Class `DescriptorCache` (in `consumer/descriptor_cache.py`): in-memory dict keyed by `(service_id, env)`. TTL is `min(descriptor.max_age_seconds, 600)` — never cache longer than 10 minutes regardless of what descriptor says. On cache miss: call `DiscoveryClient.resolve_service(service_id, env)` (TASK-040). On cache hit: verify descriptor signature is still valid (exp not exceeded). Expose `async get(service_id, env) -> ServiceDescriptor`. If Discovery is unreachable and cache is empty, raise `ServiceNotFound` (503). If cache is stale but Discovery unreachable, serve stale with WARNING log."
+      },
+      {
+        "step": 3,
+        "title": "Verify producer ServiceDescriptor signature",
+        "detail": "Before using any endpoint from the descriptor, verify the JWS signature using `verify_jws(descriptor.signed_jwt, resolver)`. The signer is the producer DID from `descriptor.producer_did`. Verify: (1) JWS signature valid. (2) `producer_did` in descriptor payload matches `iss` in JWS. (3) `exp` not exceeded (descriptors have max 10 min TTL). (4) `service_id` in descriptor matches requested service_id. If verification fails: evict from cache and raise `DescriptorInvalid` (502). This prevents DNS/cache-poisoning attacks from redirecting traffic to rogue endpoints."
+      },
+      {
+        "step": 4,
+        "title": "Endpoint selection with weighted round-robin",
+        "detail": "Class `EndpointSelector` in `consumer/endpoint_selector.py`. Descriptor contains `endpoints: [{url, weight, health_status}]`. Filter out endpoints with `health_status == 'draining'` or `'unhealthy'`. Apply weighted random selection: assign cumulative weights, draw `random.uniform(0, total_weight)`. If all endpoints are unhealthy/draining: fallback to returning any available (non-draining) endpoint with WARNING log. If no endpoints at all: raise `NoEndpointsAvailable` (503). Track per-endpoint consecutive failure count — after 3 failures, mark as unhealthy locally for 30s (circuit breaker per endpoint)."
+      },
+      {
+        "step": 5,
+        "title": "Credential selection for VP",
+        "detail": "Function `select_credentials(service_id: str, env: str, credential_store: CredentialStore) -> list[str]`. Query local credential store (TASK-038) for credentials where: `credentialSubject.service_id == service_id AND credentialSubject.env == env AND exp > now AND status != revoked`. If no credentials found: raise `NoCredentialAvailable` (403 to local client — not the producer's fault). Select all matching (consumer may hold both identity + access credentials — include both types). If multiple of same type, prefer the one with latest `exp` (most recently issued)."
+      },
+      {
+        "step": 6,
+        "title": "Build VP and ProofClaims per attempt",
+        "detail": "For each attempt (up to max_retries): (1) Generate new `jti = str(uuid4())`. (2) Call `create_vp(vcs=credentials, holder_did=consumer_did, holder_key=consumer_key, aud=descriptor.service_did, nonce=jti, env=env, exp_seconds=60)`. (3) Call `ProofClaimsBuilder.build(method, url, body, aud=descriptor.service_did, env=env)` using same jti from step 1 (jti is shared between proof and VP nonce to create binding). (4) Build headers via `build_secure_headers(proof_jwt, vp_jwt)`. (5) Append original request headers (minus Authorization which is replaced). CRITICAL: steps 1-4 MUST be repeated fresh for each retry — never reuse jti or VP."
+      },
+      {
+        "step": 7,
+        "title": "Send request and handle response",
+        "detail": "Use shared `httpx.AsyncClient` (from TASK-037 app state, max_connections=100). Call: `response = await client.request(method, endpoint_url + '/' + path, headers=headers, content=body, params=query_params, timeout=httpx.Timeout(connect=5.0, read=30.0, write=10.0))`. On success (2xx): pass response back to local client, preserving status code and content-type. On 4xx from producer: do NOT retry (auth failure is not transient) — return 502 with `{error: 'UPSTREAM_AUTH_FAILURE', upstream_status: 4xx}` to local client. On 5xx or timeout: retry with backoff. On final retry failure: return 503 to local client."
+      },
+      {
+        "step": 8,
+        "title": "Retry policy and backoff",
+        "detail": "Max 3 total attempts (1 initial + 2 retries). Backoff: attempt 1→2: sleep 0.5s, attempt 2→3: sleep 1.0s. Jitter: add `random.uniform(0, 0.1)` to each sleep to avoid retry storms. On each retry: (1) regenerate jti + VP + proof (step 6 above). (2) Re-select endpoint (may select a different one if previous failed). (3) Log: `level=WARNING event=outbound_retry attempt={n} service_id={id} endpoint={url} reason={reason}`. Do NOT retry on: 400, 401, 403, 422 from producer (these are definitive rejections)."
+      },
+      {
+        "step": 9,
+        "title": "Telemetry propagation",
+        "detail": "On each outbound request: (1) Propagate `traceparent` header (W3C Trace Context) sampled from current OTel span. (2) Set `X-Correlation-ID` to the correlation_id received from local client (or generate if absent). (3) Add `X-Forwarded-For` with local client IP if not already present (but scrub before forwarding to avoid leaking internal topology). (4) Create OTel child span `sentinel.outbound_request` with attributes: `service_id`, `endpoint`, `attempt_number`, `vp_jti` (for correlation). (5) Record `outbound_requests_total{service_id, status}` Prometheus counter."
+      },
+      {
+        "step": 10,
+        "title": "Tests",
+        "detail": "Test file: `tests/integration/consumer/test_outbound_pipeline.py`. Cases: (1) successful request end-to-end with mock producer; (2) descriptor signature invalid — request rejected before send; (3) no credentials available — 403 returned to client; (4) producer returns 401 — no retry, 502 returned; (5) producer returns 503 then 200 — retry succeeds with NEW jti (assert second jti != first jti); (6) all retries fail — 503 returned to client; (7) no endpoints available — 503 immediately; (8) endpoint circuit breaker trips after 3 failures. Use `respx` for HTTPX mocking."
+      }
+    ]
+  },
+  "project_structure": {
+    "files": {
+      "sentinel/consumer/routes/outbound.py": "FastAPI outbound proxy route handler",
+      "sentinel/consumer/pipeline.py": "OutboundPipeline orchestrator class",
+      "sentinel/consumer/descriptor_cache.py": "DescriptorCache with TTL and signature verification",
+      "sentinel/consumer/endpoint_selector.py": "EndpointSelector with weighted round-robin and local circuit breaker",
+      "sentinel/consumer/credential_selector.py": "select_credentials function",
+      "tests/integration/consumer/test_outbound_pipeline.py": "Integration tests with mock producer"
+    }
+  },
+  "error_handling": [
+    {"code": "ServiceNotFound", "status": 503, "trigger": "Discovery unreachable and cache empty"},
+    {"code": "DescriptorInvalid", "status": 502, "trigger": "Descriptor JWS signature invalid or expired"},
+    {"code": "NoCredentialAvailable", "status": 403, "trigger": "No matching VC for service_id+env in local store"},
+    {"code": "NoEndpointsAvailable", "status": 503, "trigger": "All producer endpoints unhealthy/draining"},
+    {"code": "UpstreamAuthFailure", "status": 502, "trigger": "Producer returns 401/403 — not retried"},
+    {"code": "UpstreamUnavailable", "status": 503, "trigger": "All retries exhausted with 5xx/timeout"}
+  ],
+  "security_constraints": [
+    "Producer ServiceDescriptor signature MUST be verified before trusting any endpoint URL — prevents SSRF via descriptor injection",
+    "New jti+VP MUST be generated per retry — never reuse jti",
+    "Hop-by-hop headers (Connection, Transfer-Encoding, Upgrade) must be stripped before forwarding",
+    "Internal endpoint URLs from descriptor must not be returned to local clients in error messages",
+    "Timeout must be enforced to prevent producer-side slow-loris attacks holding consumer goroutines"
+  ],
+  "dependencies": ["TASK-037", "TASK-040", "TASK-041", "TASK-043", "TASK-032"],
+  "acceptance_criteria": [
+    "Successful request completes end-to-end with correct VP and proof headers",
+    "New jti is generated for each retry attempt (asserted in tests)",
+    "Descriptor with invalid signature is rejected before any request is sent",
+    "4xx from producer does not trigger retry",
+    "503 returned to local client after all retries exhausted",
+    "Trace context propagated in all outbound requests"
+  ]
+}

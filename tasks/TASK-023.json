@@ -1,0 +1,94 @@
+{
+  "id": "TASK-023",
+  "title": "Discovery Service: Admin Authentication (OIDC/JWT), RBAC, and Session Hardening",
+  "component": "discovery-service",
+  "status": "not-started",
+  "description": "Implement authentication and authorization for human operators accessing the Discovery Service admin API and UI. Use OIDC for production (with a local JWT dev fallback). Implement role-based access control (RBAC) with four roles: viewer, operator, security-admin, chain-admin. Every admin action is audit-logged with the actor's identity.",
+  "objectives": [
+    "All sensitive admin endpoints protected by validated OIDC/JWT token",
+    "Role-to-permission mapping enforced at router dependency layer",
+    "Every admin mutation generates an audit_event record with actor ID"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      "Step 1 - Auth Modes: OIDC (production) and local JWT (dev). Controlled by AUTH_MODE env var. In OIDC mode: validate Bearer tokens from configured IdP using JWKS endpoint. In JWT mode: validate tokens signed with a local HS256 key (dev only, never in prod). Fail startup if AUTH_MODE=oidc but OIDC_ISSUER_URL is not set.",
+      "Step 2 - OIDC Token Validation: Fetch JWKS from {OIDC_ISSUER_URL}/.well-known/jwks.json (cache for 1h, refresh on key miss). Validate: alg in [RS256, ES256], iss == OIDC_ISSUER_URL, aud contains DISCOVERY_AUDIENCE, exp not expired, nbf not in future. Extract sub (user ID) and roles claim (list of strings).",
+      "Step 3 - Role Definitions: VIEWER (read-only access to all resources), OPERATOR (can create/update services, sentinels, issue enrollment tokens), SECURITY_ADMIN (can approve enrollment tokens, issue/revoke credentials, manage trust policy), CHAIN_ADMIN (can publish status anchors, manage blockchain config). Roles stored in JWT custom claim.",
+      "Step 4 - RBAC Dependency: Create require_roles(*roles: str) -> Callable FastAPI dependency factory. Returns Depends(verify_token_and_roles). Raises 401 if no valid token, 403 if token lacks required role. Usage: @router.post(..., dependencies=[Depends(require_roles('operator'))]).",
+      "Step 5 - CurrentUser Dependency: get_current_user() returns CurrentUser(sub=str, roles=list[str], email=str). Injected via Depends() into all admin endpoints. Used for audit logging.",
+      "Step 6 - Audit Integration: Every endpoint that modifies state calls audit_log(session, actor=current_user, action='create_service', target_type='service', target_id=str(service.id), summary={...}). Audit function appends to audit_events table (TASK-022 repository).",
+      "Step 7 - Break-glass Admin: A single local emergency account with SECURITY_ADMIN role, credentials stored in Vault (prod) or env var (dev). Access logged with special actor_type='BREAK_GLASS'. Rotated after each use. Documented in TASK-066 runbook.",
+      "Step 8 - Session Hardening: No server-side sessions for API clients — stateless JWT Bearer. For UI: access token stored in memory (not localStorage); refresh token via HttpOnly cookie with SameSite=Strict; CSRF token for cookie-bearing requests. Token TTL: access=15min, refresh=8h.",
+      "Step 9 - Rate Limiting on Auth: /api/v1/auth/* endpoints rate-limited: 10 requests/minute per IP. Applies to both OIDC callback and dev JWT issue endpoints.",
+      "Step 10 - Dev JWT Endpoint (dev mode only): POST /api/v1/auth/dev-token with {sub, roles}. Returns a short-lived JWT signed with LOCAL_JWT_SECRET. ONLY available if DISCOVERY_ENV=dev. Returns 404 in test/prod environments."
+    ],
+    "project_structure": {
+      "files": {
+        "services/discovery/src/discovery/auth/": {
+          "__init__.py": "",
+          "oidc.py": "OIDC token validation + JWKS cache",
+          "local_jwt.py": "Dev-mode JWT (disabled in prod)",
+          "rbac.py": "require_roles() dependency factory",
+          "models.py": "CurrentUser dataclass"
+        },
+        "services/discovery/src/discovery/api/v1/routers/auth.py": "Auth endpoints (dev token, OIDC callback)"
+      }
+    },
+    "domain_entities": [
+      {
+        "name": "CurrentUser",
+        "type": "dataclass",
+        "fields": [
+          {"name": "sub", "type": "str", "description": "OIDC subject (user ID)"},
+          {"name": "email", "type": "str", "optional": true},
+          {"name": "roles", "type": "list[str]"},
+          {"name": "raw_token", "type": "str", "description": "Raw JWT for downstream use — never logged"}
+        ]
+      }
+    ],
+    "api_endpoints": [
+      {
+        "method": "POST",
+        "path": "/api/v1/auth/dev-token",
+        "description": "Dev mode only: issue local JWT",
+        "request": {"sub": "admin", "roles": ["security-admin"]},
+        "response": {"access_token": "eyJ...", "token_type": "Bearer", "expires_in": 900},
+        "auth": "none (dev env only)"
+      }
+    ],
+    "error_handling": {
+      "error_codes": [
+        {"code": "TOKEN_MISSING", "http": 401, "description": "Authorization header absent"},
+        {"code": "TOKEN_INVALID", "http": 401, "description": "JWT signature or claims invalid"},
+        {"code": "TOKEN_EXPIRED", "http": 401, "description": "JWT exp has passed"},
+        {"code": "INSUFFICIENT_ROLE", "http": 403, "description": "Token lacks required role"},
+        {"code": "DEV_ONLY_ENDPOINT", "http": 404, "description": "Endpoint not available in this environment"}
+      ]
+    },
+    "security_constraints": [
+      "AUTH_MODE=local_jwt MUST NOT be enabled in env=prod or env=test — enforce at startup",
+      "JWKS cache MUST be refreshed on key rotation — implement 'kid not found' → re-fetch logic",
+      "Refresh tokens MUST use HttpOnly + Secure + SameSite=Strict cookies",
+      "sub from token MUST be recorded in every audit event — never a display name or email",
+      "raw_token MUST NOT appear in any log or error response"
+    ]
+  },
+  "technical_requirements": [
+    "python-jose or authlib for JWT validation",
+    "httpx for JWKS fetching",
+    "Pydantic v2 for token claims validation"
+  ],
+  "dependencies": [
+    "TASK-021",
+    "TASK-022",
+    "TASK-002"
+  ],
+  "acceptance_criteria": [
+    "Endpoint with require_roles('operator') returns 401 without token",
+    "Endpoint with require_roles('operator') returns 403 for viewer-role token",
+    "Valid operator token permits access and audit event is written",
+    "Dev-token endpoint returns 404 in test/prod environment",
+    "OIDC validation rejects expired tokens",
+    "Break-glass account has actor_type='BREAK_GLASS' in audit log"
+  ]
+}

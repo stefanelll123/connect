@@ -1,0 +1,92 @@
+{
+  "id": "TASK-064",
+  "title": "CI/CD Pipelines: Build/Test/Lint, Contract Deploy, SCA/SAST, Image Signing, Environment Promotion",
+  "component": "infra/ci",
+  "status": "pending",
+  "description": "Create GitHub Actions CI/CD pipelines for the full platform. CI covers: Python lint/type-check/test, frontend lint/test/build, smart contract compile/test/static analysis, SCA dependency scanning (block High/Critical CVEs). CD covers: build images + SBOM + cosign signing, auto-deploy to dev on merge, manual approval for staging/prod, smoke tests post-deploy. Smart contract deployment pipeline with ABI/address artifact publishing and atomic Discovery config update.",
+  "objectives": [
+    "CI pipeline for Python services (ruff lint, mypy type-check, pytest with coverage gate)",
+    "CI pipeline for React frontend (ESLint, TypeScript tsc, Vitest, Vite build)",
+    "CI pipeline for smart contracts (Hardhat compile, test, Slither static analysis)",
+    "SCA scanning for Python (pip-audit) and Node (npm audit) — block High/Critical CVEs",
+    "CD pipeline: Docker build + syft SBOM + cosign sign + push to registry",
+    "CD deploy stages: dev (auto), staging (approval), prod (two-person approval) + smoke tests",
+    "Contract deploy pipeline with approval gates and ABI/address artifact publishing"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      {
+        "step": 1,
+        "title": "Python CI workflow",
+        "detail": "File: `.github/workflows/ci-python.yml`. Triggers: pull_request targeting main, push to main. Jobs: `lint` (runs on ubuntu-latest, Python 3.12): `pip install ruff mypy` → `ruff check libs/ services/` → `mypy libs/ services/ --ignore-missing-imports --strict` (fail on error). `test`: `pip install -r requirements-test.lock` → `pytest tests/ --cov=libs --cov=services --cov-fail-under=80 --cov-report=xml -x`. Upload coverage XML to Codecov. `sca-python`: `pip install pip-audit` → `pip-audit -r requirements.lock --format=json --output=pip-audit.json` → parse JSON and fail if any vulnerability severity HIGH or CRITICAL (`jq '.vulnerabilities[] | select(.severity == \"HIGH\" or .severity == \"CRITICAL\") | error' pip-audit.json`). Upload pip-audit.json as artifact."
+      },
+      {
+        "step": 2,
+        "title": "Frontend CI workflow",
+        "detail": "File: `.github/workflows/ci-frontend.yml`. Jobs: `lint-typecheck`: `npm ci` → `npx eslint src/ --max-warnings 0` → `npx tsc --noEmit` (TypeScript type-only compilation, no output). `test`: `npx vitest run --coverage --coverage.provider=v8 --coverage.thresholds.lines=80`. `build`: `npm run build` (Vite) → verify `dist/` directory contains `index.html` and at least one `.js` bundle. `sca-node`: `npm audit --audit-level high` — exits non-zero if HIGH or CRITICAL found (use `--json` flag for machine-readable output). Upload build artifact (`dist/`) for use in Docker build job. Set `NODE_ENV=production` for build step."
+      },
+      {
+        "step": 3,
+        "title": "Smart contract CI workflow",
+        "detail": "File: `.github/workflows/ci-contracts.yml`. Jobs: `compile-test`: `npm ci` → `npx hardhat compile` → `npx hardhat test` (runs all test files in `test/`). Fail if any test fails or compilation error. `coverage`: `npx hardhat coverage --solcoverjs .solcover.js` — fail if branch coverage < 90%. `slither-analysis`: Install Slither: `pip install slither-analyzer`. Run `slither contracts/ --json slither-output.json`. Post-process: fail CI on any HIGH or CRITICAL (impact: High, confidence: High) finding. Upload slither-output.json as artifact. `mythril-analysis` (optional, slow): run only on schedule (weekly) not on every PR."
+      },
+      {
+        "step": 4,
+        "title": "Docker build and image signing pipeline",
+        "detail": "File: `.github/workflows/cd-build.yml`. Triggers: push to main (after CI passes). Jobs: `build-discovery`: `docker buildx build --platform linux/amd64 --cache-from type=gha --cache-to type=gha,mode=max --tag $REGISTRY/discovery:$SHA -f infra/docker/discovery/Dockerfile --push .`. `sbom-sign-discovery`: `syft $REGISTRY/discovery:$SHA -o cyclonedx-json > sbom-discovery.json`. `cosign sign --yes $REGISTRY/discovery@$(docker inspect --format='{{index .RepoDigests 0}}' $REGISTRY/discovery:$SHA)`. Upload sbom-discovery.json artifact. Repeat for sentinel and discovery-ui. Require `id-token: write` permission (for OIDC cosign keyless signing). After all builds: tag images as `:dev` for auto-deploy."
+      },
+      {
+        "step": 5,
+        "title": "CD pipeline — dev auto-deploy",
+        "detail": "File: `.github/workflows/cd-deploy-dev.yml`. Triggers: workflow_run on `cd-build.yml` completed with success. Job: `deploy-dev`: checkout → configure kubectl (dev cluster kubeconfig in secret `KUBECONFIG_DEV`). Verify images: `cosign verify --certificate-identity-regexp=<github_actions_url> --certificate-oidc-issuer=https://token.actions.githubusercontent.com $IMAGE_DIGEST`. Deploy: `helm upgrade --install sentinel-discovery infra/helm/discovery -f infra/helm/discovery/values-dev.yaml --set image.tag=$SHA --wait --timeout=5m`. `helm upgrade --install sentinel-node infra/helm/sentinel -f infra/helm/sentinel/values-dev.yaml --set image.tag=$SHA --wait --timeout=5m`. After deploy: run smoke tests (see step 7)."
+      },
+      {
+        "step": 6,
+        "title": "CD pipeline — staging and prod approval gates",
+        "detail": "File: `.github/workflows/cd-deploy-staging.yml`. Uses GitHub Actions `environment: staging` with required reviewers (1 reviewer). On approval: deploy with `values-staging.yaml`. After deploy: run extended smoke tests (5m timeout). File: `.github/workflows/cd-deploy-prod.yml`. Uses `environment: production` with required reviewers (2 reviewers — two-person rule). Gate: prod deploy ONLY from tags matching `v*.*.*` (not from SHA directly). Steps: cosign verify → helm upgrade (prod values) → wait rollout → smoke tests. On failure: automatic rollback: `helm rollback sentinel-discovery` and `helm rollback sentinel-node`. Rollback also triggers PagerDuty alert."
+      },
+      {
+        "step": 7,
+        "title": "Smoke tests post-deploy",
+        "detail": "File: `tests/smoke/smoke_test.sh`. Script run after each Helm deploy. Tests: (1) `curl -sf $DISCOVERY_URL/health/ready` returns 200. (2) `curl -sf $DISCOVERY_URL/api/v1/services` returns 200 with JSON array. (3) Sentinel health: `curl -sf $SENTINEL_URL/api/v1/health/ready` returns 200 with `did_initialized: true`. (4) Sentinel metrics: `curl -sf $SENTINEL_URL/metrics` returns 200 with `sentinel_inbound_requests_total` in body. (5) Discovery metrics: `curl -sf $DISCOVERY_URL/metrics` returns 200. Each check retried up to 5× with 10s sleep. Fail workflow if any check fails after retries. Produce JUnit XML report for GitHub Actions test summary."
+      },
+      {
+        "step": 8,
+        "title": "Smart contract deployment pipeline",
+        "detail": "File: `.github/workflows/cd-contracts.yml`. Triggers: ONLY from tags `contract-v*.*.*`. Environment: `contract-deploy` (requires 2 approvers — separate from app deploy). Steps: compile → run tests one final time → deploy to Sepolia: `npx hardhat run scripts/deploy.js --network sepolia`. Capture deployed addresses from stdout. Publish addresses as artifact (`contract-addresses-$TAG.json`). Update Discovery Service config: POST to Discovery API with new `blockchain_config.contract_addresses` (requires admin JWT). Verify: query each contract on-chain to confirm deployment. Emit Slack notification with Etherscan links. Never auto-deploy contracts — always requires manual tag + approval."
+      }
+    ]
+  },
+  "project_structure": {
+    "files": {
+      ".github/workflows/ci-python.yml": "Python lint + test + SCA pipeline",
+      ".github/workflows/ci-frontend.yml": "Frontend lint + test + build pipeline",
+      ".github/workflows/ci-contracts.yml": "Smart contract compile + test + Slither",
+      ".github/workflows/cd-build.yml": "Docker build + SBOM + cosign sign pipeline",
+      ".github/workflows/cd-deploy-dev.yml": "Auto-deploy to dev environment",
+      ".github/workflows/cd-deploy-staging.yml": "Staging deploy with 1-reviewer approval",
+      ".github/workflows/cd-deploy-prod.yml": "Prod deploy with 2-reviewer approval + rollback",
+      ".github/workflows/cd-contracts.yml": "Contract deploy pipeline with approval gates",
+      "tests/smoke/smoke_test.sh": "Post-deploy smoke tests script"
+    }
+  },
+  "security_constraints": [
+    "KUBECONFIG secrets: use short-lived Kubernetes ServiceAccount tokens (not long-lived kubeconfig files) via GitHub Apps OIDC federation where possible",
+    "Registry credentials: use OIDC federation to ECR/GCR rather than static credentials stored in CI secrets",
+    "SCA gate: block merge if pip-audit or npm audit finds HIGH or CRITICAL — no override without security team approval logged in PR comment",
+    "Secrets in CI: `${{ secrets.X }}` only — never hardcoded. Enforce via GitLeaks pre-commit hook (add to CI as `gitleaks detect --source .`)",
+    "Contract deploy: only from signed tags — prevents accidental deploy from branch or unreviewed commit",
+    "Prod deployment logs retained 90 days (GitHub Actions log retention configuration)"
+  ],
+  "dependencies": ["TASK-009", "TASK-061", "TASK-019", "TASK-062"],
+  "acceptance_criteria": [
+    "CI Python pipeline passes on clean main branch (lint, mypy, pytest, pip-audit all green)",
+    "CI blocks merge when HIGH CVE introduced (verified by adding a known-vulnerable package in test branch)",
+    "Docker images built, SBOM generated, cosign verify succeeds in deploy pipeline",
+    "Dev auto-deploy completes within 10 minutes of merge to main",
+    "Staging deploy requires manual approval — deploy blocked until reviewer approves in GitHub UI",
+    "Prod deploy requires 2 approvals and only succeeds from version-tagged commit",
+    "Rollback executes automatically within 2 minutes of failed smoke tests",
+    "Smart contract pipeline requires separate approval and posts Etherscan links to Slack on success"
+  ]
+}

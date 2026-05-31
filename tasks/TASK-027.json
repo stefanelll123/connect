@@ -1,0 +1,158 @@
+{
+  "id": "TASK-027",
+  "title": "Discovery Service: Config Bundle Generation, Signing, and Versioned Delivery for Sentinels",
+  "component": "discovery-service",
+  "status": "not-started",
+  "description": "Implement the mechanism by which the Discovery Service produces a versioned, cryptographically-signed configuration bundle for each sentinel. The bundle contains all operational parameters the sentinel needs: discovery endpoints, chain config, trust anchors, revocation parameters (Δ), observability config, and policy defaults. Sentinels must verify the bundle signature before applying any configuration. Rollback to a previous version is administrative-only and audit-logged.",
+  "objectives": [
+    "Every sentinel operates with a deterministic, verifiable configuration traceable to a specific bundle version",
+    "Bundle signing with Discovery's issuer key prevents tampering in transit or storage",
+    "Controlled rollback with full audit trail — rollback is protected by security-admin role"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      "Step 1 - Bundle Schema Definition: Define the canonical JSON structure for a config bundle. Fields: bundle_version (int, monotonically increasing per sentinel), issued_at (ISO-8601), sentinel_did (str), sentinel_id (UUID), role ('producer'|'consumer'), env ('dev'|'test'|'prod'), service_id (str), discovery (object: { sync_url, credentials_url, heartbeat_url, status_list_base_url }), chain (object: { network, chain_id, rpc_urls: list[str], contract_addresses: { issuer_registry, trust_policy_registry, status_registry, service_registry } }), policy_defaults (object: { max_token_age_seconds, allow_unknown_issuers: false, fail_closed_on_chain_error: true }), revocation (object: { delta_seconds, cache_ttl_seconds, mode: 'strict'|'best-effort' }), observability (object: { otlp_endpoint, log_level, trace_sampling_rate }), issued_by (DID of Discovery issuer), signature_kid (key ID used to sign).",
+      "Step 2 - ConfigBundleService: Create services/discovery/src/discovery/services/config_bundle_service.py. Method generate_and_sign(sentinel_id: UUID, session: AsyncSession) -> ConfigBundle: (a) load sentinel record, (b) load current Discovery settings, (c) build bundle dict, (d) canonicalize to UTF-8 JSON (sorted keys, no extra whitespace), (e) compute bundle_hash = SHA-256(canonical_bytes), (f) sign canonical JSON as JWS with Discovery issuer key (kid from SecretStorage), (g) persist to config_bundles table (TASK-022), (h) return signed bundle.",
+      "Step 3 - JWS Signing: Use python-jose or PyJWT. Sign the canonical bundle JSON as the JWS payload (not the hash — sign the full content). Detached payload format optional; standard JWS compact serialization acceptable. Include JOSE header: { alg: 'EdDSA'|'ES256', kid: '<key_id>', typ: 'config-bundle+jwt' }. The signed_bundle_jws column in config_bundles stores the full JWS string.",
+      "Step 4 - Persistence: config_bundles table (TASK-022). Columns: id (UUID PK), sentinel_id (UUID FK), version (INT NOT NULL), bundle_hash (TEXT NOT NULL), signed_bundle_jws (TEXT NOT NULL), issued_at (TIMESTAMPTZ), is_current (BOOL default true). On new bundle: set is_current=false on all prior bundles for this sentinel_id, then insert with is_current=true. Keep last 10 versions (delete oldest if count > 10). Index on (sentinel_id, is_current) and (sentinel_id, version).",
+      "Step 5 - Config Bundle Fetch Endpoint: GET /api/v1/sentinels/{sentinel_id}/config. Auth: sentinel auth token (bearer token issued at onboarding) OR security-admin. Returns latest config bundle (is_current=true). Response: signed_bundle_jws (Sentinel verifies signature before use), bundle_hash, version, issued_at. Add ETag: bundle_hash. Support If-None-Match: if client sends matching ETag → 304 Not Modified. Sentinel must validate: parse JWS, verify signature with Discovery public key, check issued_at within acceptable age, check sentinel_did matches own DID.",
+      "Step 6 - Config Bundle Admin List: GET /api/v1/sentinels/{sentinel_id}/config/history. Auth: security-admin or operator. Returns last 10 versions: [ { version, bundle_hash, issued_at, is_current } ]. GET /api/v1/sentinels/{sentinel_id}/config/{version} returns specific version JWS. Used for audit and rollback decisions.",
+      "Step 7 - Rollback Endpoint: POST /api/v1/sentinels/{sentinel_id}/config/rollback?to_version=X. Auth: security-admin. Validate X exists in history and is not current version. Re-sign the historical bundle with current issuer key (to prevent stale key usage on rollback) — generate a new signed JWS with incremented version = max_version + 1 but content from version X. Mark previous current as not current. Write audit event: action='config_rollback', summary={ from_version, to_version, sentinel_id }. NOTE: rolling back applies the old config content but with a new version number and fresh signature.",
+      "Step 8 - Bundle Invalidation on Sentinel Decommission: When a sentinel is decommissioned (TASK-033), call ConfigBundleService.invalidate(sentinel_id). Mark all bundles is_current=false and insert a terminal bundle with empty/disabled config (policy_defaults.all_requests_denied=true). Prevents a re-activated sentinel from operating with stale config.",
+      "Step 9 - Key Rotation in Bundle: When Discovery issuer key rotates, config bundles retain their old JWS (historical record). New bundles generated after rotation use new key + new kid. Sentinels must trust both old and new Discovery public key during a rotation window (configured in bundle as trusted_discovery_kids: list[str]).",
+      "Step 10 - Webhook Notification (Optional): If webhook_url is configured per sentinel, POST to webhook_url with { event: 'config_updated', sentinel_id, new_version, bundle_hash } after new bundle generation. Sentinel polls as fallback; webhook is best-effort with one retry."
+    ],
+    "project_structure": {
+      "files": {
+        "services/discovery/src/discovery/services/config_bundle_service.py": "Bundle generation, signing, invalidation",
+        "services/discovery/src/discovery/api/v1/routers/config_bundles.py": "GET config, GET history, POST rollback endpoints",
+        "services/discovery/src/discovery/schemas/config_bundle.py": "Pydantic schemas for bundle request/response",
+        "services/discovery/src/discovery/repositories/config_bundles.py": "DB operations: insert, get_current, get_history, rollback"
+      }
+    },
+    "domain_entities": [
+      {
+        "name": "ConfigBundle",
+        "table": "config_bundles",
+        "fields": [
+          { "name": "id", "type": "UUID", "pk": true },
+          { "name": "sentinel_id", "type": "UUID", "fk": "sentinels.id", "not_null": true },
+          { "name": "version", "type": "INT", "not_null": true },
+          { "name": "bundle_hash", "type": "TEXT", "not_null": true, "comment": "SHA-256 hex of canonical bundle JSON" },
+          { "name": "signed_bundle_jws", "type": "TEXT", "not_null": true, "comment": "Full JWS compact serialization" },
+          { "name": "issued_at", "type": "TIMESTAMPTZ", "default": "now()" },
+          { "name": "is_current", "type": "BOOL", "default": true }
+        ],
+        "indexes": [
+          "INDEX(sentinel_id, is_current)",
+          "INDEX(sentinel_id, version DESC)",
+          "UNIQUE(sentinel_id, version)"
+        ]
+      }
+    ],
+    "api_endpoints": [
+      {
+        "method": "GET",
+        "path": "/api/v1/sentinels/{sentinel_id}/config",
+        "auth": "sentinel bearer token OR admin",
+        "headers": { "If-None-Match": "optional ETag from previous response" },
+        "response_200": {
+          "signed_bundle_jws": "eyJhbGciOiJFZERTQSIsImtpZCI6ImtleS0xIiwidHlwIjoiY29uZmlnLWJ1bmRsZStqd3QifQ...",
+          "bundle_hash": "a3f1c9b7...",
+          "version": 3,
+          "issued_at": "2024-01-15T10:00:00Z"
+        },
+        "response_304": "Not Modified (if If-None-Match matches current bundle_hash)"
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/sentinels/{sentinel_id}/config/rollback",
+        "auth": "security-admin",
+        "query_params": { "to_version": 2 },
+        "response_200": {
+          "new_version": 4,
+          "rolled_back_to_content_version": 2,
+          "bundle_hash": "b8e2f441...",
+          "issued_at": "2024-01-15T10:05:00Z"
+        }
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/sentinels/{sentinel_id}/config/history",
+        "auth": "operator",
+        "response_200": {
+          "items": [
+            { "version": 3, "bundle_hash": "a3f1c9b7...", "issued_at": "...", "is_current": true },
+            { "version": 2, "bundle_hash": "91ca3b12...", "issued_at": "...", "is_current": false }
+          ]
+        }
+      }
+    ],
+    "bundle_payload_example": {
+      "bundle_version": 3,
+      "issued_at": "2024-01-15T10:00:00Z",
+      "sentinel_did": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+      "sentinel_id": "a1b2c3d4-...",
+      "role": "producer",
+      "env": "prod",
+      "service_id": "billing-api",
+      "discovery": {
+        "sync_url": "https://discovery.example.gov/api/v1/sentinels/a1b2c3d4/config",
+        "credentials_url": "https://discovery.example.gov/api/v1/sentinels/a1b2c3d4/credentials",
+        "heartbeat_url": "https://discovery.example.gov/api/v1/sentinels/a1b2c3d4/heartbeat",
+        "status_list_base_url": "https://discovery.example.gov/status/"
+      },
+      "chain": {
+        "network": "sepolia",
+        "chain_id": 11155111,
+        "rpc_urls": ["https://rpc.example.gov/sepolia"],
+        "contract_addresses": {
+          "issuer_registry": "0xABCD...",
+          "trust_policy_registry": "0xDEF0...",
+          "status_registry": "0x1234...",
+          "service_registry": "0x5678..."
+        }
+      },
+      "policy_defaults": {
+        "max_token_age_seconds": 300,
+        "allow_unknown_issuers": false,
+        "fail_closed_on_chain_error": true
+      },
+      "revocation": {
+        "delta_seconds": 300,
+        "cache_ttl_seconds": 60,
+        "mode": "strict"
+      },
+      "observability": {
+        "otlp_endpoint": "http://otel-collector.example.gov:4317",
+        "log_level": "info",
+        "trace_sampling_rate": 0.1
+      },
+      "issued_by": "did:key:z6Discovery...",
+      "signature_kid": "discovery-key-2024-01"
+    },
+    "error_handling": [
+      { "condition": "sentinel_id not found", "status": 404, "code": "SENTINEL_NOT_FOUND", "message": "Sentinel not found" },
+      { "condition": "no config bundle exists yet", "status": 404, "code": "CONFIG_NOT_YET_GENERATED", "message": "No config bundle has been generated for this sentinel" },
+      { "condition": "rollback to nonexistent version", "status": 404, "code": "VERSION_NOT_FOUND", "message": "Config bundle version 99 does not exist for this sentinel" },
+      { "condition": "rollback to current version", "status": 409, "code": "ALREADY_CURRENT", "message": "Version 3 is already the current config version" },
+      { "condition": "issuer key unavailable (SecretStorage error)", "status": 503, "code": "SIGNING_KEY_UNAVAILABLE", "message": "Config bundle signing temporarily unavailable" }
+    ],
+    "security_constraints": [
+      "Bundle signed with Discovery issuer key (kid included in JWS header). Sentinel MUST verify before applying.",
+      "Rollback is security-admin only — prevents operators from downgrading security policy",
+      "All rollback events write to audit_events with from_version, to_version, actor identity",
+      "Bundle content never includes secrets — only addresses, URLs, DID references, and policy parameters",
+      "Sentinels should validate issued_at is within 24h to reject stale bundles (configurable max_bundle_age)"
+    ]
+  },
+  "dependencies": ["TASK-026", "TASK-006", "TASK-007"],
+  "acceptance_criteria": [
+    "Generated bundle passes JWS signature verification using Discovery public key",
+    "bundle_hash SHA-256 matches the canonical JSON of the bundle content",
+    "GET /config with matching ETag returns 304 without body",
+    "Rollback creates a new version with old content and fresh signature — version is higher than before rollback",
+    "Decommissioned sentinel receives a terminal config bundle (all_requests_denied=true)",
+    "Config history endpoint returns last 10 versions with is_current correctly set"
+  ]
+}

@@ -1,0 +1,120 @@
+{
+  "id": "TASK-020",
+  "title": "Python Blockchain Client: Async web3.py Integration and Event Indexer",
+  "component": "libs/common",
+  "status": "not-started",
+  "description": "Implement the Python blockchain client in libs/common/chain/. Provides: (1) async wrappers for reading from and writing to all four registry contracts, (2) an event indexer that subscribes to contract events and updates local DB cache, (3) connection management with reconnect logic. Used by both Discovery Service and Sentinel.",
+  "objectives": [
+    "Type-safe Python async interface to all four smart contracts",
+    "Local event-driven cache in PostgreSQL to avoid on-chain reads per request",
+    "Reconnect logic for RPC provider failures",
+    "ABI loaded from contracts/abis/ — no hardcoded ABI in Python source"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      "Step 1 - Contract Client Base Class: In libs/common/src/common/chain/base.py. ContractClient: __init__(web3: AsyncWeb3, address: ChecksumAddress, abi: list). Load contract via web3.eth.contract(address, abi). Expose _contract attribute. Provide async_call(fn_name, *args) for read-only and async_transact(fn_name, *args, private_key) for state-changing calls.",
+      "Step 2 - AsyncWeb3 Provider Setup: In libs/common/src/common/chain/provider.py. create_web3(rpc_url: str) -> AsyncWeb3. If rpc_url starts with 'ws:', use WebSocketProvider. If http: use AsyncHTTPProvider. Configure: request_kwargs timeout=30s, retry_backoff middleware for HTTP providers. Test connectivity on startup: await web3.eth.chain_id.",
+      "Step 3 - IssuerRegistryClient: In chain/clients/issuer_registry.py. Methods: async is_issuer_active(did: str) -> bool; async get_issuer(did: str) -> IssuerRecordModel | None; async register_issuer(did, name, description, metadata_uri, *, private_key) -> TxReceipt; async revoke_issuer(did, *, private_key) -> TxReceipt. All reads are async_call. Writes use async_transact with EIP-1559 gas estimation.",
+      "Step 4 - TrustPolicyRegistryClient, StatusRegistryClient, ServiceRegistryClient: Same pattern. Expose all IInterface methods with typed Python equivalents. Use Pydantic models (shared with vc_schemas) for return types.",
+      "Step 5 - ABI Loader: In chain/abi_loader.py. load_abi(contract_name: str) -> list. Path resolution: locate contracts/abis/{contract_name}.abi.json relative to repo root. Cache in module-level dict. Fail fast with FileNotFoundError if ABI missing (run make export-abis first).",
+      "Step 6 - Event Indexer (chain/indexer.py): ChainEventIndexer: async run() — main loop. Uses eth_getLogs with fromBlock=last_indexed_block+1, toBlock='latest'. poll_interval=15s (configurable). Processes: IssuerRegistered, IssuerRevoked → update issuer_cache table. PolicyCreated, PolicyUpdated → update policy_cache table. StatusAnchorPublished → update status_anchor_cache table. ServiceRegistered, ServiceDeregistered → update service_cache table. Store last_indexed_block in chain_sync_state table.",
+      "Step 7 - DB Cache Tables Schema: issuers_cache (did TEXT PK, did_hash TEXT, name TEXT, active BOOLEAN, registered_at TIMESTAMPTZ, synced_at TIMESTAMPTZ). trust_policies_cache (service_id TEXT PK, allowed_issuer_dids JSONB, required_credential_types JSONB, version INT, active BOOLEAN). status_anchors_cache (id TEXT PK, issuer_did TEXT, status_list_index INT, credential_hash TEXT, status_list_url TEXT, freshness_delta_seconds INT). services_cache (service_id TEXT PK, did TEXT, base_url TEXT, role TEXT, active BOOLEAN). chain_sync_state (id SERIAL PK, last_indexed_block BIGINT, last_sync_at TIMESTAMPTZ).",
+      "Step 8 - Transaction Handling: All writes use nonce management: fetch current nonce with getTransactionCount(sender, 'pending'). Use asyncio.Lock per sender address to prevent nonce collision. Retry once on replacement transaction underpriced error with 1.1x gas bump.",
+      "Step 9 - ChainSettings Pydantic Model: rpc_url: str (env: BLOCKCHAIN_RPC_URL), deployer_private_key: SecretStr (env: BLOCKCHAIN_DEPLOYER_KEY, optional), contracts_path: Path (env: CONTRACTS_PATH, default='contracts/'), network_chain_id: int (env: BLOCKCHAIN_CHAIN_ID, default=31337).",
+      "Step 10 - Unit Tests: Mock AsyncWeb3 using unittest.mock.AsyncMock. Test: ABI loading finds correct file; is_issuer_active returns True/False based on mocked contract call; event indexer processes mocked getLogs response and writes to DB (use test DB or SQLite for tests); nonce lock prevents concurrent nonce assignment."
+    ],
+    "project_structure": {
+      "files": {
+        "libs/common/src/common/chain/__init__.py": "Exports all clients + indexer",
+        "libs/common/src/common/chain/base.py": "ContractClient base",
+        "libs/common/src/common/chain/provider.py": "AsyncWeb3 factory",
+        "libs/common/src/common/chain/abi_loader.py": "ABI file loading",
+        "libs/common/src/common/chain/settings.py": "ChainSettings",
+        "libs/common/src/common/chain/indexer.py": "ChainEventIndexer",
+        "libs/common/src/common/chain/clients/": {
+          "issuer_registry.py": "",
+          "trust_policy_registry.py": "",
+          "status_registry.py": "",
+          "service_registry.py": ""
+        },
+        "libs/common/tests/chain/": "Chain client tests"
+      }
+    },
+    "domain_entities": [
+      {
+        "name": "IssuerRecordModel",
+        "type": "Pydantic BaseModel",
+        "fields": [
+          {"name": "did", "type": "str"},
+          {"name": "did_hash", "type": "str"},
+          {"name": "name", "type": "str"},
+          {"name": "description", "type": "str"},
+          {"name": "registered_at", "type": "datetime"},
+          {"name": "updated_at", "type": "datetime"},
+          {"name": "active", "type": "bool"},
+          {"name": "metadata_uri", "type": "str"}
+        ]
+      },
+      {
+        "name": "ChainSettings",
+        "type": "Pydantic BaseSettings",
+        "fields": [
+          {"name": "rpc_url", "type": "str", "env": "BLOCKCHAIN_RPC_URL"},
+          {"name": "deployer_private_key", "type": "SecretStr", "env": "BLOCKCHAIN_DEPLOYER_KEY", "optional": true},
+          {"name": "network_chain_id", "type": "int", "env": "BLOCKCHAIN_CHAIN_ID", "default": 31337}
+        ]
+      }
+    ],
+    "database_schema": {
+      "tables": [
+        {
+          "name": "issuers_cache",
+          "columns": [
+            {"name": "did", "type": "TEXT", "primary_key": true},
+            {"name": "did_hash", "type": "TEXT", "not_null": true},
+            {"name": "name", "type": "TEXT"},
+            {"name": "description", "type": "TEXT"},
+            {"name": "active", "type": "BOOLEAN", "not_null": true},
+            {"name": "registered_at", "type": "TIMESTAMPTZ"},
+            {"name": "synced_at", "type": "TIMESTAMPTZ", "not_null": true}
+          ]
+        },
+        {
+          "name": "chain_sync_state",
+          "columns": [
+            {"name": "id", "type": "SERIAL", "primary_key": true},
+            {"name": "contract_name", "type": "TEXT", "not_null": true, "unique": true},
+            {"name": "last_indexed_block", "type": "BIGINT", "not_null": true, "default": 0},
+            {"name": "last_sync_at", "type": "TIMESTAMPTZ"}
+          ]
+        }
+      ]
+    },
+    "security_constraints": [
+      "Private keys MUST be handled via SecretStr — never logged or serialized to plaintext",
+      "RPC URL with API keys MUST be treated as a secret (may contain Infura/Alchemy key)",
+      "Nonce management asyncio.Lock MUST cover the full get-nonce → submit-tx sequence atomically",
+      "ABI files loaded from filesystem — path must not allow directory traversal (validate no '..' in contract_name)",
+      "Web3 responses are untrusted input — validate all field types before storing in DB"
+    ]
+  },
+  "technical_requirements": [
+    "web3>=6.18.0",
+    "asyncio-compatible (all network calls async)",
+    "SQLAlchemy 2.0 async for DB writes in indexer",
+    "asyncpg for PostgreSQL"
+  ],
+  "dependencies": [
+    "TASK-009",
+    "TASK-010",
+    "TASK-013"
+  ],
+  "acceptance_criteria": [
+    "IssuerRegistryClient.is_issuer_active() returns correct result against local Hardhat node",
+    "ChainEventIndexer processes IssuerRegistered events and writes to issuers_cache table",
+    "Nonce lock prevents concurrent transaction nonce collision in tests",
+    "ABI loader raises FileNotFoundError for unknown contract name",
+    "All chain client tests pass with mocked web3 provider",
+    "Direct private key exposure never appears in logs"
+  ]
+}

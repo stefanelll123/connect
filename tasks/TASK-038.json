@@ -1,0 +1,50 @@
+{
+  "id": "TASK-038",
+  "title": "Sentinel: Encrypted Key and Credential Storage with SecretStorage Integration (Local + Vault)",
+  "component": "sentinel",
+  "status": "not-started",
+  "description": "Implement secure local persistence of the sentinel's private keys, issuer trust materials, cached credentials, and cached status lists. Uses the SecretStorage abstraction from TASK-011, which supports both a local encrypted file backend (AES-256-GCM with scrypt-derived key) and HashiCorp Vault backend. Implements strict file permission validation, Vault token auto-renewal, and an encrypted wallet snapshot for disaster recovery.",
+  "objectives": [
+    "Private key never stored in plaintext — always encrypted at rest in both local and Vault modes",
+    "Startup validation of file permissions prevents accidental key exposure via overly permissive files",
+    "Vault integration supports auto-renewal and graceful read-only degraded mode on Vault downtime"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      "Step 1 - SecretStorage Integration: Import SecretStorageClient from libs/secrets (TASK-011). In Sentinel startup: instantiate based on SECRET_STORAGE_BACKEND setting ('local' or 'vault'). Inject into Wallet class (TASK-039) as the storage backend. All key and credential operations go through this interface.",
+      "Step 2 - Local Storage Layout: When SECRET_STORAGE_BACKEND=local: base directory is $SENTINEL_HOME/.sentinel/store/ (default /var/sentinel/store/ in Docker). Directory structure: keys/did_private_key.enc (Ed25519 private key, AES-256-GCM encrypted), keys/issuer_trust.enc (trusted issuer public keys + cert chain), credentials/sentinel_identity.enc (latest SentinelIdentityCredential JWT), credentials/service_binding.enc, credentials/access_grants/ (directory, one file per credential, named {jti}.enc), status_cache/ (one file per status_list_id, raw bitstring bytes, NOT encrypted). All .enc files: prefix with 16-byte random nonce + 16-byte tag + ciphertext.",
+      "Step 3 - File Permission Validation at Startup: On startup (before loading any keys): check that $SENTINEL_HOME/.sentinel/store/ has mode 0700 (owner only, no group/world access). Check each .enc key file has mode 0600. If any file/directory has group or world read/write/execute permissions: LOG CRITICAL and refuse to start. Use os.stat() and bitwise checks. In Docker: run sentinel process as a non-root user (UID 1000) — verify effective UID != 0 at startup.",
+      "Step 4 - Credential Cache Storage: Credentials received from Discovery (TASK-029) are encrypted with the same AES-256-GCM key and stored in credentials/ directory. File name: {credential_type}_{jti[:8]}.enc. On load: decrypt, parse JWT, verify exp > now(). Stale credentials (exp < now()) are not loaded (but not deleted — kept for audit). Credential store provides: get_active(credential_type) → list[str (JWT)], store(jwt_str) → None, invalidate(jti) → None.",
+      "Step 5 - Status List Cache: Status list raw bistrings cached in status_cache/{status_list_id}.bin (NOT encrypted — public data). Also store metadata alongside: {status_list_id}_meta.json including: fetched_at, current_hash, expires_at (fetched_at + delta). On load, validate hash(bytes) == current_hash. On expiry (fetched_at + delta < now()): cache is stale, trigger background refresh, but DO NOT delete cached copy (still usable until fresh is available, depending on OUTAGE_POLICY).",
+      "Step 6 - Vault Backend: When SECRET_STORAGE_BACKEND=vault: use HVAC library (async wrapper or thread pool). Key path: sentinel/{sentinel_id}/did_private_key (Vault KV v2). Credentials stored as a JSON object at sentinel/{sentinel_id}/credentials/{jti}. On startup: validate Vault token (auth required). Implement token renewal loop: renew token when TTL < 1h. On renewal failure: retry 3 times with backoff. After 3 failures: LOG CRITICAL, set vault_available=false. Behavior with vault_available=false: configurable via VAULT_OUTAGE_POLICY: 'fail_closed' (refuse all operations) | 'read_only' (use cached in-memory copy, refuse new key operations).",
+      "Step 7 - Vault Transit Encryption (Advanced Mode): If VAULT_USE_TRANSIT=true: instead of storing the raw private key in KV, store the key name in Vault Transit. Signing operations use Vault Transit sign API directly (sentinel never holds the plaintext private key). Implications: signing requires network call to Vault; implement in-process key caching with 5-minute TTL for performance. Fallback: not supported in transit mode — if Vault is down, signing is impossible.",
+      "Step 8 - In-Memory Secret Cache: At startup, load decrypted private key into memory as bytes in a SecretBytes wrapper. This in-memory copy is used for signing operations (avoid repeated disk decryption). SecretBytes wrapper: zeroes memory on __del__ using ctypes. Never serialize this object (block __repr__, __str__, JSON serialization). TTL: in-memory key valid for 1h (configurable), then re-loaded from encrypted storage.",
+      "Step 9 - Wallet Snapshot Export (Disaster Recovery): sentinelctl snapshot --output snapshot.enc command (TASK-049). Exports: encrypted ZIP containing all .enc files + a recovery manifest JSON. Encrypted with an operator-provided passphrase using scrypt(passphrase) → AES-256-GCM key. Import: sentinelctl restore --snapshot snapshot.enc. ONLY for dev/disaster-recovery — never used in normal operation. Snapshot does NOT include raw plaintext keys.",
+      "Step 10 - Integrity Validation on Load: When loading a credential from local store: verify JWT signature using trusted issuer public key (loaded from keys/issuer_trust.enc). If signature verification fails → discard file, log SECURITY_ALERT, continue without that credential."
+    ],
+    "project_structure": {
+      "files": {
+        "services/sentinel/src/sentinel/wallet/credential_store.py": "Encrypted credential persistence",
+        "services/sentinel/src/sentinel/wallet/status_cache.py": "Status list byte cache",
+        "services/sentinel/src/sentinel/wallet/secret_bytes.py": "SecretBytes wrapper (memory zeroing)",
+        "services/sentinel/src/sentinel/wallet/vault_client.py": "Vault integration with auto-renewal",
+        "services/sentinel/src/sentinel/startup/permission_check.py": "File permission validation at startup"
+      }
+    },
+    "security_constraints": [
+      "No plaintext key ever written to disk or appearing in any log line",
+      "File permission check is mandatory — misconfig causes startup failure, not a warning",
+      "SecretBytes wrapper prevents accidental logging of key material",
+      "Vault outage behaviour is configurable but defaults to fail_closed in prod",
+      "Snapshot export is only available when SENTINEL_ROLE is not running (offline tool, not an API endpoint)"
+    ]
+  },
+  "dependencies": ["TASK-011", "TASK-037"],
+  "acceptance_criteria": [
+    "Sentinel refuses to start if any key file has world-readable permissions (unit test with tempfile)",
+    "Credential loaded from local store fails signature verification → credential discarded and SECURITY_ALERT logged",
+    "Vault token auto-renewal test: mock token TTL at 55 minutes → renewal triggered, new token stored",
+    "SecretBytes.__repr__ returns '<secret>' — not the key bytes (unit test)",
+    "Wallet snapshot export produces a non-empty .enc file; restore successfully loads credentials from it"
+  ]
+}

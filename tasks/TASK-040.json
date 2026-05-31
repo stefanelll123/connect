@@ -1,0 +1,62 @@
+{
+  "id": "TASK-040",
+  "title": "Sentinel: Discovery Client (mTLS, Bootstrap, Config/Credential Sync, Heartbeat, Descriptor Publish)",
+  "component": "sentinel",
+  "status": "not-started",
+  "description": "Implement the DiscoveryClient module used by the sentinel to communicate with the Discovery Service. Covers: initial onboarding/rejoin handshake (TASK-026 flow), periodic config bundle polling (ETag-aware), incremental credential sync, heartbeat submission, and producer descriptor publishing. Uses HTTPX async with mTLS, configurable timeouts, idempotency keys, and exponential backoff. All network operations are idempotent and resilient to transient failures.",
+  "objectives": [
+    "Sentinel can bootstrap from scratch using only the enrollment token and Discovery URL — no pre-loaded state",
+    "Config and credential sync are efficient: only bytes sent when content actually changed (ETag/304)",
+    "All Discovery calls are wrapped in retry logic with circuit breaker to survive Discovery downtime"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      "Step 1 - DiscoveryClient Class: Create services/sentinel/src/sentinel/clients/ds_client.py. Class DiscoveryClient(base_url, mtls_cert_path, mtls_key_path, ca_cert_path, sentinel_id, sentinel_did). Initialize httpx.AsyncClient with: verify=ca_cert_path, cert=(mtls_cert_path, mtls_key_path), timeout=httpx.Timeout(connect=5.0, read=30.0, write=10.0), follow_redirects=False. Retry wrapper: RetryWithBackoff(max_attempts=3, base_delay=0.5, max_delay=16.0, jitter=True).",
+      "Step 2 - Enrollment Flow: async def onboard(enrollment_token: str) → OnboardingBundle. Phase 1: POST {base_url}/api/v1/sentinels/onboard body={enrollment_token, did}. If response 200 with challenge_nonce: sign PoP via Wallet.sign_pop(challenge_nonce, jwt_jti). Phase 2: POST again with proof included and X-Idempotency-Key set. Parse OnboardingBundle from 201 response. Store bundle in Wallet (sentinel_id, discovery endpoints, chain addresses, initial credentials). If 409 ENROLLMENT_ALREADY_CONSUMED → log info, call get_current_config() to resume from existing registration.",
+      "Step 3 - Config Bundle Polling: async def sync_config() → changed: bool. GET {base_url}/api/v1/sentinels/{sentinel_id}/config with If-None-Match header (current ETag from wallet). 304 → no-op, return False. 200 → parse signed_bundle_jws, verify JWS signature using Discovery trusted public key (from wallet), apply bundle to SentinelSettings, store new ETag. Return True. Run every CONFIG_SYNC_INTERVAL_SECONDS (default 60, from config bundle). Failure: log warning, retry; stale config still valid until bundle expires.",
+      "Step 4 - Credential Sync: async def sync_credentials() → new_count: int. GET {base_url}/api/v1/sentinels/{sentinel_id}/credentials?since={last_sync_ts}. Parse credentials list. For each credential: validate JWT signature, check exp > now() + 60s buffer. Store valid credentials in Wallet (TASK-038). Mark deprecated credentials for grace-window handling. Update last_sync_ts. Return count of new credentials. Run every CREDENTIAL_SYNC_INTERVAL_SECONDS (default 120).",
+      "Step 5 - Heartbeat: async def send_heartbeat(instance_id: str, version: str, health: dict) → None. POST {base_url}/api/v1/sentinels/heartbeat body={sentinel_id, instance_id, version, health}. Bearer token: sentinel auth token from Wallet. Run every HEARTBEAT_INTERVAL_SECONDS (default 30, from config bundle). On 401: trigger token renewal flow before retry. On connection error: log warning, skip beat, increment missed_heartbeats counter (Prometheus metric). If missed_heartbeats > 5 consecutive: log CRITICAL 'Discovery unreachable'.",
+      "Step 6 - Producer Descriptor Publish: async def publish_descriptor(service_descriptor_jws: str) → None. POST {base_url}/api/v1/services/{service_id}/descriptor body={signed_descriptor_jws}. X-Idempotency-Key set to hash of descriptor content (prevents duplicate publish on network retry). Run on sentinel startup (producer mode) and every DESCRIPTOR_REFRESH_INTERVAL_SECONDS (default 60 × 4 = 240 seconds — must re-publish before valid_until expires). On 403 UNAUTHORIZED_PUBLISHER: log critical, stop retry (DID mismatch — not retryable).",
+      "Step 7 - Auth Token Management: Sentinel authenticates to Discovery using a bearer token issued at onboarding (TASK-026). This token has 24h TTL. DiscoveryClient stores it in Wallet. Before any authenticated request: check token exp. If exp < now() + 300s: call renew_auth_token(). Renewal: POST {base_url}/api/v1/sentinels/{sentinel_id}/auth/renew body={did_pop_proof}. On renewal success: store new token. On failure: log critical, continue with old token until it expires.",
+      "Step 8 - Circuit Breaker: Wrap all Discovery HTTP calls in a circuit breaker (tenacity or custom). Config: fail_max=5 consecutive failures, reset_timeout=60s. When OPEN: skip call, return cached result (or None for non-critical). Log 'ds_circuit_open'. Emit Prometheus metric ds_circuit_breaker_state (0=closed, 1=open). Re-test with a single request after timeout (HALF-OPEN).",
+      "Step 9 - Bootstrap Sequence: On sentinel startup if wallet is empty (no sentinel_id stored): require ENROLLMENT_TOKEN env var. Call onboard(ENROLLMENT_TOKEN). On success: clear ENROLLMENT_TOKEN from environment (os.environ.pop). If wallet already has sentinel_id: skip onboarding. If wallet has sentinel_id but sentinel is decommissioned (discovery returns 410): call rejoin() or panic with instructions.",
+      "Step 10 - Sync Orchestration: DiscoverySyncLoop: background asyncio task that runs the sync cycle. Start in lifespan. Cycle: every 1 second check if any sync interval has elapsed. Uses asyncio.Event and asyncio.wait_for for coordination. Individual sync tasks: config sync, credential sync, heartbeat, descriptor publish each run independently on their own intervals. Failures in one sync do NOT block others."
+    ],
+    "project_structure": {
+      "files": {
+        "services/sentinel/src/sentinel/clients/ds_client.py": "DiscoveryClient + RetryWithBackoff + circuit breaker",
+        "services/sentinel/src/sentinel/clients/sync_loop.py": "DiscoverySyncLoop background task",
+        "services/sentinel/src/sentinel/clients/auth_token.py": "Token management and renewal"
+      }
+    },
+    "interface_contracts": {
+      "onboard": "async def onboard(enrollment_token: str) -> OnboardingBundle",
+      "sync_config": "async def sync_config() -> bool",
+      "sync_credentials": "async def sync_credentials() -> int",
+      "send_heartbeat": "async def send_heartbeat(instance_id: str, version: str, health: dict) -> None",
+      "publish_descriptor": "async def publish_descriptor(service_descriptor_jws: str) -> None"
+    },
+    "error_handling": [
+      { "condition": "onboard called but token already consumed (409)", "behavior": "Log info, switch to get_current_config() — no re-registration needed" },
+      { "condition": "config sync 304", "behavior": "No-op, return False — no config change" },
+      { "condition": "credential sync returns expired credentials", "behavior": "Silently skip storing expired credentials — log debug" },
+      { "condition": "heartbeat fails 5 consecutive times", "behavior": "Log CRITICAL + emit ds_discovery_unreachable metric — continue operation with cached config" },
+      { "condition": "descriptor publish 403 UNAUTHORIZED_PUBLISHER", "behavior": "Log CRITICAL — DID mismatch is not retryable — emit security_alert metric" }
+    ],
+    "security_constraints": [
+      "mTLS: client certificate presented on every request to Discovery — reject connections without mTLS in prod",
+      "JWS of config bundle verified before applying — tampered bundle rejected",
+      "Credential JWT signature verified before storing in wallet",
+      "Enrollment token cleared from environment after successful onboarding",
+      "Discovery auth bearer token stored only in Wallet (encrypted at rest) — never in environment variables"
+    ]
+  },
+  "dependencies": ["TASK-026", "TASK-027", "TASK-029", "TASK-033"],
+  "acceptance_criteria": [
+    "Fresh sentinel with enrollment token successfully onboards and receives config bundle + initial credentials",
+    "Second onboarding attempt with same token (409) gracefully switches to config fetch without creating duplicates",
+    "Config sync with matching ETag → 304, no config re-apply",
+    "Discovery unreachable for 5 heartbeat cycles → ds_discovery_unreachable metric = 1",
+    "Circuit breaker opens after 5 failures, closes after 60s, allows single test request"
+  ]
+}

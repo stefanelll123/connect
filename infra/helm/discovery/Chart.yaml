@@ -1,0 +1,16 @@
+apiVersion: v2
+name: sentinel-discovery
+description: Discovery Service — DID registry, policy engine, and audit log
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - discovery
+  - did
+  - sentinel
+  - trust
+maintainers:
+  - name: Platform Team
+home: https://github.com/your-org/connect
+sources:
+  - https://github.com/your-org/connect/tree/main/services/discovery

@@ -1,0 +1,17 @@
+# Build artifacts
+artifacts/
+cache/
+dist/
+
+# TypeChain generated types
+typechain-types/
+
+# Dependency directory
+node_modules/
+
+# Local environment (contains private keys — never commit)
+.env
+
+# Deployment coverage reports
+coverage/
+coverage.json

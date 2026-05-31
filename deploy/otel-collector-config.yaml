@@ -1,0 +1,73 @@
+# OTel Collector configuration for the Sentinel platform (local dev + CI)
+# Receives traces/metrics/logs via OTLP from services; exposes Prometheus scrape endpoint.
+
+extensions:
+  health_check:
+    endpoint: "0.0.0.0:13133"
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: "0.0.0.0:4317"
+      http:
+        endpoint: "0.0.0.0:4318"
+
+processors:
+  batch:
+    timeout: 10s
+    send_batch_size: 1024
+
+  # Drop any attribute that looks like a private key or secret
+  attributes/sanitize:
+    actions:
+      - key: "private_key"
+        action: delete
+      - key: "secret"
+        action: delete
+      - key: "password"
+        action: delete
+      - key: "token"
+        action: delete
+
+  memory_limiter:
+    check_interval: 5s
+    limit_mib: 256
+
+exporters:
+  # Prometheus scrape endpoint for Grafana (metrics only)
+  prometheus:
+    endpoint: "0.0.0.0:8889"
+    namespace: sentinel
+
+  # Debug exporter — logs a summary of each batch to stdout (dev only)
+  debug:
+    verbosity: normal
+
+  # Forward traces to Grafana Tempo (for production use; commented out by default)
+  # otlp/tempo:
+  #   endpoint: "tempo:4317"
+  #   tls:
+  #     insecure: true
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, attributes/sanitize, batch]
+      exporters: [debug]
+
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus, debug]
+
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, attributes/sanitize, batch]
+      exporters: [debug]
+
+  telemetry:
+    logs:
+      level: "info"

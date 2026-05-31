@@ -1,0 +1,123 @@
+{
+  "id": "TASK-030",
+  "title": "Discovery Service: Bitstring Status List Publication and Revocation Management",
+  "component": "discovery-service",
+  "status": "not-started",
+  "description": "Implement the generation, update, signing, and publication of Bitstring Status Lists (W3C v1.0) for credential revocation and suspension. The module provides an admin revocation API, a public read-only status list endpoint for sentinels and verifiers, periodic auto-publish jobs, and integration hooks for on-chain anchoring (TASK-031). Every revocation is dual-person controlled in prod and fully audit-logged.",
+  "objectives": [
+    "Operational revocation via admin API with latency under 60 seconds end-to-end",
+    "Status lists are signed, versioned, and cache-friendly (ETag, public CDN-compatible endpoint)",
+    "Audit trail for every revocation: who revoked, when, why, with what severity"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      "Step 1 - Status List Model: Each status list is owned by a (issuer_did, env, credential_type) triple. Status list ID: lowercase UUID or slug (e.g. prod-sentinel-identity-001). Bitstring: a bytes array of length = ceil(max_credentials / 8), stored in DB as BYTEA. Each credential gets a static index allocated at issuance time (call allocate_index() atomically). Index is immutable for credential lifetime.",
+      "Step 2 - StatusListService: Create services/discovery/src/discovery/services/status_list_service.py. Methods: allocate_index(issuer_did, env, credential_type) -> (status_list_id, index); set_bit(status_list_id, index, value: 0|1) -> None; get_status(status_list_id, index) -> 0|1; generate_status_list_credential(status_list_id) -> str (signed JWT); publish(status_list_id) -> None (persist + update hash).",
+      "Step 3 - Atomic Index Allocation: Use SELECT ... FOR UPDATE on the status_lists row to get the current top_index. Increment top_index. If top_index >= MAX_LIST_SIZE (default 131072): create a new status list for the same (issuer_did, env, credential_type) bucket and allocate from new list. Commit in single transaction. This prevents index collisions at high concurrency.",
+      "Step 4 - StatusListCredential JWT: Follows Bitstring Status List v1.0. JWT header: { alg: 'EdDSA', kid: '<key_id>', typ: 'statuslist+jwt' }. JWT payload: { iss, sub: status_list_url, iat, exp: iat + 24h, vc: { '@context': ['https://www.w3.org/ns/credentials/v2', 'https://www.w3.org/ns/credentials/status/v1'], type: ['VerifiableCredential', 'BitstringStatusListCredential'], credentialSubject: { id: status_list_url, type: 'BitstringStatusList', statusPurpose: 'revocation', encodedList: <base64url(gzip(bitstring_bytes))> } } }.",
+      "Step 5 - Public Status List Endpoint: GET /status/{status_list_id}. No authentication required — public endpoint for sentinels and any verifier. Returns the latest StatusListCredential JWT with Content-Type: application/jwt. Add: ETag (hash of encodedList), Cache-Control: public, max-age=60, must-revalidate. Support If-None-Match for 304 responses. This endpoint must be accessible without VPN in prod.",
+      "Step 6 - Revocation Admin Endpoint: POST /api/v1/credentials/{credential_id}/revoke. Auth: security-admin. Body: { reason: str (max 500 chars), severity: 'low'|'medium'|'critical', revoked_by: str }. Steps: (a) load credential record, verify status='active', (b) set bit at status_list_index to 1, (c) update credential status='revoked' in DB, (d) trigger publish(), (e) write audit event: action='credential_revoked', actor, credential_id, jti, reason, severity. Response 200: { revoked_at, status_list_id, status_list_index, next_publish_at }.",
+      "Step 7 - Suspension Endpoint (Optional): POST /api/v1/credentials/{credential_id}/suspend. Suspends a credential temporarily without permanent revocation. Uses a second status list with statusPurpose='suspension' if configured. Reversal: POST /api/v1/credentials/{credential_id}/unsuspend. Both audit logged.",
+      "Step 8 - Dual-Person Control in Prod: If env='prod' AND dual_control_enabled=true in settings: POST /revoke creates a pending_revocations record with status='PENDING_APPROVAL'. A second security-admin must POST /api/v1/credentials/{credential_id}/revoke/confirm. After confirmation, revocation proceeds. Rejection: DELETE /api/v1/credentials/{credential_id}/revoke/pending. Audit events for request, confirmation, and execution.",
+      "Step 9 - Periodic Publish Job: Background task (Arq or APScheduler) runs every 60 seconds. For each status list with dirty=true (modified since last publish): re-sign the StatusListCredential JWT, update current_hash, clear dirty flag, update published_at. Emit Prometheus metric: status_list_publish_duration_seconds, status_list_size_bytes.",
+      "Step 10 - On-Chain Anchoring Hook: After each publish, if ANCHOR_STATUS_LIST_ON_CHAIN=true: emit an internal event or call StatusRegistryClient.anchor_status_list(status_list_id, current_hash). TASK-031 implements the actual on-chain write. Store anchor_tx_hash and anchor_pending flag in status_lists table. This is best-effort — revocation does NOT wait for chain confirmation.",
+      "Step 11 - Rollover on Full Status List: When a status list reaches MAX_LIST_SIZE, it is frozen (no new indexes allocated). New credentials for the same bucket get a new status list ID. Old list remains published and read-only. Sentinels and verifiers must support following the statusListCredential URL to the current list.",
+      "Step 12 - Idempotent Revocation: Revoking an already-revoked credential returns 200 with { already_revoked: true, revoked_at: original_revocation_time }. Does not fail, does not re-write audit event. Allows safe retry from admin UI."
+    ],
+    "project_structure": {
+      "files": {
+        "services/discovery/src/discovery/services/status_list_service.py": "Core status list logic",
+        "services/discovery/src/discovery/api/v1/routers/revocations.py": "Revoke, suspend, unsuspend, list-revocations endpoints",
+        "services/discovery/src/discovery/api/v1/routers/status_lists.py": "Public GET /status/{id} endpoint",
+        "services/discovery/src/discovery/tasks/status_list_publisher.py": "Background publish job",
+        "services/discovery/src/discovery/repositories/status_lists.py": "DB: allocate_index, set_bit, get_current, update_hash"
+      }
+    },
+    "domain_entities": [
+      {
+        "name": "StatusList",
+        "table": "status_lists",
+        "fields": [
+          { "name": "id", "type": "UUID", "pk": true },
+          { "name": "status_list_id", "type": "TEXT", "unique": true, "not_null": true },
+          { "name": "issuer_did", "type": "TEXT", "not_null": true },
+          { "name": "env", "type": "TEXT", "not_null": true },
+          { "name": "credential_type", "type": "TEXT" },
+          { "name": "bitstring", "type": "BYTEA", "not_null": true, "comment": "Raw bitstring, NOT gzip-encoded — encoding applied at JWT generation" },
+          { "name": "top_index", "type": "INT", "not_null": true, "default": 0, "comment": "Next available index to allocate" },
+          { "name": "max_size", "type": "INT", "not_null": true, "default": 131072 },
+          { "name": "current_hash", "type": "TEXT" },
+          { "name": "dirty", "type": "BOOL", "default": false, "comment": "True if bitstring changed since last publish" },
+          { "name": "published_at", "type": "TIMESTAMPTZ" },
+          { "name": "version", "type": "INT", "default": 1 },
+          { "name": "anchor_tx_hash", "type": "TEXT", "nullable": true },
+          { "name": "anchor_pending", "type": "BOOL", "default": false },
+          { "name": "is_frozen", "type": "BOOL", "default": false }
+        ],
+        "indexes": [
+          "UNIQUE(status_list_id)",
+          "INDEX(issuer_did, env, credential_type, is_frozen)"
+        ]
+      }
+    ],
+    "api_endpoints": [
+      {
+        "method": "GET",
+        "path": "/status/{status_list_id}",
+        "auth": "none (public)",
+        "response_200": {
+          "content_type": "application/jwt",
+          "body": "<signed StatusListCredential JWT>",
+          "headers": {
+            "ETag": "\"hash-of-encoded-list\"",
+            "Cache-Control": "public, max-age=60, must-revalidate"
+          }
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/credentials/{credential_id}/revoke",
+        "auth": "security-admin",
+        "request": {
+          "reason": "Sentinel compromised during incident 2024-001",
+          "severity": "critical",
+          "revoked_by": "admin@example.gov"
+        },
+        "response_200": {
+          "credential_id": "uuid",
+          "jti": "urn:uuid:...",
+          "revoked_at": "2024-01-15T10:00:00Z",
+          "status_list_id": "prod-sentinel-identity-001",
+          "status_list_index": 42,
+          "next_publish_at": "2024-01-15T10:01:00Z"
+        }
+      }
+    ],
+    "error_handling": [
+      { "condition": "credential not found", "status": 404, "code": "CREDENTIAL_NOT_FOUND", "message": "Credential not found" },
+      { "condition": "credential already revoked (idempotent)", "status": 200, "code": null, "body": { "already_revoked": true, "revoked_at": "original_ts" } },
+      { "condition": "dual-control required — pending approval", "status": 202, "code": "REVOCATION_PENDING_APPROVAL", "message": "Revocation request created and awaiting second approval. Use /revoke/confirm to proceed." },
+      { "condition": "status list not found for ID", "status": 404, "code": "STATUS_LIST_NOT_FOUND", "message": "Status list 'xyz' not found" },
+      { "condition": "status list endpoint gzip error", "status": 500, "code": "ENCODING_FAILURE", "message": "Status list encoding failed" }
+    ],
+    "security_constraints": [
+      "Revocation endpoint protected by security-admin role (TASK-023)",
+      "In prod with dual_control_enabled: single admin cannot unilaterally revoke — second approval required",
+      "Every revocation writes an audit event with actor identity, credential jti, reason, and severity",
+      "Public /status endpoint does not require auth — but only returns the signed JWT, not bitstring raw data",
+      "set_bit operation is transactional — concurrent revocations on same status list are serialized via SELECT FOR UPDATE",
+      "StatusListCredential JWT signed with Discovery issuer key — sentinels must verify signature before trusting",
+      "On-chain anchoring is best-effort — revocation takes effect locally before chain confirmation"
+    ]
+  },
+  "dependencies": ["TASK-007", "TASK-028", "TASK-022"],
+  "acceptance_criteria": [
+    "POST /revoke sets the corresponding bit and publishes updated status list within 60 seconds",
+    "GET /status/{id} returns a valid, signed Bitstring StatusListCredential JWT",
+    "Bit for revoked credential is 1 in the published bitstring",
+    "Two concurrent revocations on different indexes succeed without corruption (concurrent test)",
+    "Revocation of already-revoked credential returns 200 with already_revoked=true (idempotent)",
+    "audit_events table contains a record for each revocation with actor, jti, reason, severity",
+    "ETag-based 304 response works for polling sentinels that have not seen a change"
+  ]
+}

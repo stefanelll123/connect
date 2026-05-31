@@ -1,0 +1,89 @@
+{
+  "id": "TASK-031",
+  "title": "Discovery Service: Full Blockchain Integration (Status Anchoring, Registry Verification, Chain Indexer)",
+  "component": "discovery-service",
+  "status": "not-started",
+  "description": "Connect the Discovery Service to the deployed on-chain contracts (IssuerRegistry, TrustPolicyRegistry, StatusRegistry, ServiceRegistry) via the shared chain client library (TASK-020). Implement: policy/issuer cache with TTL, status list hash anchoring after each publish, chain event indexing, and admin endpoints for chain health and event browsing.",
+  "objectives": [
+    "Discovery always has fresh knowledge of on-chain issuer/policy state via TTL cache with warm reload",
+    "Every status list publish triggers a best-effort on-chain anchor (StatusRegistry.updateStatus)",
+    "Admin operators can inspect chain state, event lag, and recent contract events from the Discovery UI"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      "Step 1 - Integration Point: Import ChainClient and the contract client classes from libs/chain (TASK-020). In DiscoverySettings: blockchain_rpc_url, chain_id, contract_addresses (issuer_registry, trust_policy_registry, status_registry, service_registry), anchor_status_lists (bool, default false in dev, true in prod), chain_rpc_timeout_seconds (default 10).",
+      "Step 2 - Chain Health Check at Startup: In lifespan startup: call ChainClient.get_block_number(). If the call fails AND chain_required_at_startup=true → fail startup with clear error. If chain_required_at_startup=false (dev default) → log warning and continue with chain_available=false flag. Set a global circuit breaker for chain operations.",
+      "Step 3 - ChainPolicyCache: Create services/discovery/src/discovery/services/chain_policy_cache.py. At startup and on TTL expiry (default 300s): read IssuerRegistryClient.get_all_issuers() → list of (did, is_active, schema_hashes). Read TrustPolicyRegistryClient.get_policies(env) → policy parameters per env. Store in an in-process dict with last_loaded_at timestamp. Expose is_issuer_active(did) → bool and get_policy(env) → PolicyParams. On cache miss: trigger async reload. Falls back to stale cache if chain RPC fails (logs warning, emits metric chain_cache_stale=1).",
+      "Step 4 - Status Anchor Hook: In StatusListService.publish() (TASK-030), after writing to DB: if ANCHOR_STATUS_LIST_ON_CHAIN and chain_available: call StatusRegistryClient.anchor_status_list(status_list_id, current_hash) in a background task (fire-and-forget with retry). Do NOT await this in the hot revocation path — revocation is effective immediately locally. On success: update status_lists.anchor_tx_hash and anchor_pending=false. On failure: set anchor_pending=true, retry via background worker (exponential backoff, max 5 attempts).",
+      "Step 5 - Anchor Retry Worker: Background task (Arq queue). Worker task anchor_pending_status_lists(): SELECT * FROM status_lists WHERE anchor_pending=true AND anchor_attempts < 5 AND next_retry_at < now(). For each: attempt on-chain anchor. On success: clear anchor_pending, store tx_hash. On failure: increment anchor_attempts, set next_retry_at = now() + 2^attempts * 30s (exponential backoff).",
+      "Step 6 - ServiceRegistry Integration: In ServiceCRUD.create() (TASK-024): if REGISTER_SERVICE_ON_CHAIN: after DB insert, call ServiceRegistryClient.register_service(service_id, owner_did, env, schema_hash) in background task. Store tx_hash in services table. If chain fails: set chain_sync_pending=true, retry worker picks up.",
+      "Step 7 - Chain Events Indexer: Create services/discovery/src/discovery/services/chain_indexer.py. Background polling worker (every 30s): call ChainClient.get_logs(from_block, to_block) for each contract. Parse events: IssuerRegistered, IssuerDisabled, PolicyUpdated, ServiceRegistered, StatusAnchorUpdated. Upsert into chain_events table: { tx_hash, block_number, event_name, contract, args_json, indexed_at }. Update last_indexed_block in Discovery state table.",
+      "Step 8 - Chain Admin Endpoints: GET /api/v1/chain/status: requires viewer role. Returns { network, chain_id, rpc_url (masked), latest_block, indexer_last_block, indexer_lag (blocks), is_available, contracts: { issuer_registry: { address, checked_at, is_responding }, ... } }. GET /api/v1/chain/events: requires viewer role. Query params: contract, event_name, from_block, since (ISO-8601), limit (max 100). Returns paginated list of indexed events.",
+      "Step 9 - Metrics: Emit Prometheus metrics: chain_rpc_request_duration_seconds (histogram, labels: method), chain_rpc_errors_total (counter, label: method), chain_indexer_lag_blocks (gauge), chain_anchor_pending_count (gauge), chain_policy_cache_age_seconds (gauge).",
+      "Step 10 - Chain Outage Handling: If ChainClient throws RpcError: log structured error, increment chain_rpc_errors_total metric, check circuit breaker state. If circuit OPEN: skip chain operation, use cached data, log 'chain_circuit_open'. If circuit closed and error threshold exceeded: trip circuit (OPEN for 60s, then HALF-OPEN test). All chain operations wrapped in try/except with graceful degradation — chain errors NEVER cause 500s on non-chain endpoints."
+    ],
+    "project_structure": {
+      "files": {
+        "services/discovery/src/discovery/services/chain_policy_cache.py": "In-process cache for issuer/policy state",
+        "services/discovery/src/discovery/services/chain_indexer.py": "Event indexer polling worker",
+        "services/discovery/src/discovery/api/v1/routers/chain.py": "GET /chain/status, GET /chain/events",
+        "services/discovery/src/discovery/db/models/chain_events.py": "chain_events ORM model",
+        "services/discovery/src/discovery/tasks/anchor_retry_worker.py": "Retry worker for pending anchors"
+      }
+    },
+    "domain_entities": [
+      {
+        "name": "ChainEvent",
+        "table": "chain_events",
+        "fields": [
+          { "name": "id", "type": "UUID", "pk": true },
+          { "name": "tx_hash", "type": "TEXT", "not_null": true },
+          { "name": "block_number", "type": "BIGINT", "not_null": true },
+          { "name": "event_name", "type": "TEXT", "not_null": true },
+          { "name": "contract", "type": "TEXT", "not_null": true },
+          { "name": "args_json", "type": "JSONB" },
+          { "name": "indexed_at", "type": "TIMESTAMPTZ", "default": "now()" }
+        ],
+        "indexes": ["UNIQUE(tx_hash, event_name)", "INDEX(event_name, indexed_at)", "INDEX(block_number)"]
+      }
+    ],
+    "api_endpoints": [
+      {
+        "method": "GET",
+        "path": "/api/v1/chain/status",
+        "auth": "viewer",
+        "response_200": {
+          "network": "sepolia",
+          "chain_id": 11155111,
+          "latest_block": 5000000,
+          "indexer_last_block": 4999990,
+          "indexer_lag": 10,
+          "is_available": true,
+          "contracts": {
+            "issuer_registry": { "address": "0xABCD...", "is_responding": true },
+            "status_registry": { "address": "0x1234...", "is_responding": true }
+          }
+        }
+      }
+    ],
+    "error_handling": [
+      { "condition": "Chain RPC unavailable at startup (chain_required=true)", "status": "startup_failure", "message": "Chain RPC connection failed. Cannot start Discovery Service." },
+      { "condition": "Chain RPC unavailable at runtime", "behavior": "Circuit breaker trips, cached data used, chain_circuit_open metric=1 — no 500 returned to callers" },
+      { "condition": "Anchor fails after 5 retries", "behavior": "Log critical alert, set anchor_failed=true in DB, emit chain_anchor_failed metric. Manual operator action required." }
+    ],
+    "security_constraints": [
+      "Chain RPC credentials (API key, private signing key) loaded from SecretStorage — never from plain env vars in prod",
+      "chain_events table is append-only — no DELETE or UPDATE at application layer",
+      "Admin chain endpoints require viewer/operator role — chain state is read-only for operators",
+      "Circuit breaker prevents cascade failures when chain is unstable — fail-safe degraded mode"
+    ]
+  },
+  "dependencies": ["TASK-020", "TASK-024", "TASK-030"],
+  "acceptance_criteria": [
+    "At startup, chain contracts validate successfully (or Discovery starts in degraded mode with warning)",
+    "After POST /revoke, a status anchor transaction appears in status_lists.anchor_tx_hash within 5 minutes",
+    "GET /api/v1/chain/status returns correct indexer_lag value",
+    "ChainPolicyCache refreshes correctly — is_issuer_active() returns updated state after issuer is disabled on-chain",
+    "With chain RPC down: all non-chain endpoints continue operating normally; chain_circuit_open metric = 1"
+  ]
+}

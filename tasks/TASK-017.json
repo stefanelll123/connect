@@ -1,0 +1,78 @@
+{
+  "id": "TASK-017",
+  "title": "ServiceRegistry Smart Contract: Sentinel Service Registration and Routing Metadata",
+  "component": "contracts",
+  "status": "not-started",
+  "description": "Implement the ServiceRegistry Solidity contract. This contract stores service endpoint metadata — base URL, DID, supported roles (producer/consumer), active status — for all sentinel services participating in the platform. The Discovery Service uses this as a source of truth for routing, and Sentinel nodes can query it to discover peers.",
+  "objectives": [
+    "On-chain registry of sentinel service endpoints and their DIDs",
+    "Owner/admin-controlled registration and deregistration",
+    "Distinction between producer and consumer roles per service",
+    "Event-driven updates consumed by Discovery Service indexer"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      "Step 1 - ServiceRecord Struct: struct ServiceRecord { string serviceId; string did; string baseUrl; string role; bool active; uint256 registeredAt; uint256 updatedAt; string description; }. role is either 'producer' or 'consumer' — validate on entry.",
+      "Step 2 - Storage: mapping(bytes32 => ServiceRecord) private _services; key = keccak256(serviceId). mapping(bytes32 => bytes32[]) private _roleIndex; role hash → service key array for role-based enumeration. bytes32[] private _serviceKeys.",
+      "Step 3 - Events: event ServiceRegistered(bytes32 indexed serviceIdHash, string serviceId, string did, string role, string baseUrl); event ServiceUpdated(bytes32 indexed serviceIdHash, string serviceId, string newBaseUrl); event ServiceDeregistered(bytes32 indexed serviceIdHash, string serviceId);",
+      "Step 4 - registerService(string calldata serviceId, string calldata did, string calldata baseUrl, string calldata role, string calldata description): onlyRole(SERVICE_REGISTRY_ADMIN_ROLE). Validate role is 'producer' or 'consumer'. Validate baseUrl is non-empty. Require service not already active. Compute serviceIdHash. Store. Emit ServiceRegistered.",
+      "Step 5 - updateService(string calldata serviceId, string calldata newBaseUrl, string calldata description): onlyRole(SERVICE_REGISTRY_ADMIN_ROLE). Require service exists and is active. Update baseUrl and description. Emit ServiceUpdated.",
+      "Step 6 - deregisterService(string calldata serviceId): onlyRole(SERVICE_REGISTRY_ADMIN_ROLE). Set active=false. Remove from _roleIndex. Emit ServiceDeregistered.",
+      "Step 7 - Read Functions: getService(string calldata serviceId) returns (ServiceRecord memory). isServiceActive(string calldata serviceId) returns (bool). getServicesByRole(string calldata role) returns (ServiceRecord[] memory) — returns all active services for a given role. getServiceCount() returns (uint256).",
+      "Step 8 - IServiceRegistry Interface: in contracts/interfaces/IServiceRegistry.sol.",
+      "Step 9 - URL Validation Helper: Internal function _validateUrl(string calldata url) — checks url length <= 2048. Check url starts with 'https://' (enforced in production, 'http://' allowed only on local/test chain ID 31337).",
+      "Step 10 - Constructor: constructor(address initialAdmin). Grant SERVICE_REGISTRY_ADMIN_ROLE to initialAdmin."
+    ],
+    "project_structure": {
+      "files": {
+        "contracts/contracts/Registries/ServiceRegistry.sol": "Main contract",
+        "contracts/contracts/interfaces/IServiceRegistry.sol": "Interface",
+        "contracts/test/ServiceRegistry.test.ts": "Tests"
+      }
+    },
+    "domain_entities": [
+      {
+        "name": "ServiceRecord",
+        "type": "Solidity struct",
+        "fields": [
+          {"name": "serviceId", "type": "string"},
+          {"name": "did", "type": "string"},
+          {"name": "baseUrl", "type": "string"},
+          {"name": "role", "type": "string", "allowedValues": ["producer", "consumer"]},
+          {"name": "active", "type": "bool"},
+          {"name": "registeredAt", "type": "uint256"},
+          {"name": "updatedAt", "type": "uint256"},
+          {"name": "description", "type": "string"}
+        ]
+      }
+    ],
+    "error_handling": {
+      "custom_errors": [
+        "error ServiceAlreadyRegistered(bytes32 serviceIdHash);",
+        "error ServiceNotFound(bytes32 serviceIdHash);",
+        "error InvalidRole(string role);",
+        "error InvalidUrl(string reason);"
+      ]
+    },
+    "security_constraints": [
+      "baseUrl validation: on non-local chains, MUST start with 'https://' — enforced in Solidity",
+      "getServicesByRole iterates an array — cap at 1000 services to prevent out-of-gas",
+      "role MUST be one of 'producer' or 'consumer' — validated on-chain with custom error",
+      "No DID validation on-chain (too complex) — validated off-chain by Discovery Service before submitting tx"
+    ]
+  },
+  "technical_requirements": [
+    "Solidity 0.8.25",
+    "@openzeppelin/contracts 5.x"
+  ],
+  "dependencies": [
+    "TASK-013"
+  ],
+  "acceptance_criteria": [
+    "registerService stores record and emits ServiceRegistered",
+    "getServicesByRole('producer') returns only producer services",
+    "Invalid role reverts with InvalidRole",
+    "deregisterService sets active=false and removes from role index",
+    "URL with http:// on non-local chain reverts with InvalidUrl"
+  ]
+}

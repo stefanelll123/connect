@@ -1,0 +1,68 @@
+{
+  "id": "TASK-036",
+  "title": "Discovery Service: OpenTelemetry Instrumentation, Prometheus Metrics, and Health Endpoints",
+  "component": "discovery-service",
+  "status": "not-started",
+  "description": "Instrument the Discovery Service with distributed tracing (OpenTelemetry → OTLP export) and metrics (Prometheus /metrics endpoint). Add manual spans for all security-critical operations. Define a complete metrics catalogue covering gateway KPIs and security KPIs. Implement deep health endpoints for Kubernetes liveness and readiness probes. All labels must be designed to avoid high cardinality.",
+  "objectives": [
+    "Complete request tracing from HTTP boundary through DB and chain operations with security context in spans",
+    "Prometheus metrics for SRE alerting and security dashboards",
+    "Health endpoints that correctly reflect DB, Redis, and chain dependency state"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      "Step 1 - OTel SDK Setup: Install opentelemetry-sdk, opentelemetry-instrumentation-fastapi, opentelemetry-instrumentation-sqlalchemy, opentelemetry-instrumentation-httpx, opentelemetry-exporter-otlp-proto-grpc. Initialize in lifespan startup: TracerProvider with OTLPSpanExporter(endpoint=settings.otlp_endpoint). Configure BatchSpanProcessor. Set resource attributes: service.name='discovery-service', service.version=app_version, deployment.environment=settings.env.",
+      "Step 2 - FastAPI Auto-Instrumentation: Call FastAPIInstrumentor.instrument_app(app, excluded_urls='/health/live,/health/ready,/metrics'). This auto-creates spans for all HTTP requests. Exclude health/metrics endpoints from tracing noise.",
+      "Step 3 - SQLAlchemy Auto-Instrumentation: Call SQLAlchemyInstrumentor().instrument(engine=async_engine). This adds spans for all DB queries. Enable: sanitize_sql=True to redact parameter values from span attributes. Enable: enable_commenter=True for sqlcommenter format in query logs.",
+      "Step 4 - Manual Spans for Security Operations: In each of the following operations, create a child span with attributes: (a) issue_credential: span name='credential.issue', attributes: credential_type, env, subject_did (truncated), status. (b) revoke_credential: span name='credential.revoke', attributes: credential_type, env, reason, severity. (c) publish_status_list: span name='status_list.publish', attributes: status_list_id, env, anchored_on_chain. (d) sentinel_onboard: span name='sentinel.onboard', attributes: role, env. (e) chain_anchor: span name='chain.anchor', attributes: contract, tx_hash. No DID full strings in span labels — use hash prefix (first 12 chars).",
+      "Step 5 - Prometheus Metrics: Create services/discovery/src/discovery/metrics.py using prometheus_client. Define: http_requests_total (counter, labels: method, endpoint_slug, status_code), http_request_duration_seconds (histogram, labels: method, endpoint_slug, buckets=[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5]), onboarding_attempts_total (counter, labels: env, role, outcome: success|token_invalid|pop_invalid|rate_limited), credential_issuance_total (counter, labels: credential_type, env, outcome), revocation_events_total (counter, labels: credential_type, env, severity), status_list_publish_duration_seconds (histogram, labels: env), chain_rpc_request_duration_seconds (histogram, labels: method, contract), chain_rpc_errors_total (counter, labels: method, error_type), chain_indexer_lag_blocks (gauge), audit_write_failure_total (counter), sentinel_status_gauge (gauge, labels: env, role, status: active|degraded|offline).",
+      "Step 6 - Metrics Exposition: Add starlette-prometheus or prometheus-client middleware. Expose GET /metrics (Prometheus scrape endpoint). No auth required on /metrics (network-level protection via Kubernetes NetworkPolicy). Disable access log for /metrics endpoint to avoid log noise.",
+      "Step 7 - GET /health/live: Returns { status: 'ok', service: 'discovery', version: app_version, uptime_seconds: int }. Always returns 200 if the process is running. Never performs I/O. Used as Kubernetes liveness probe.",
+      "Step 8 - GET /health/ready: Async checks: (1) DB: execute 'SELECT 1' with 2s timeout, (2) Redis: PING with 1s timeout, (3) Chain (optional): eth_blockNumber with 3s timeout — only included if chain_required=true. Response: { status: 'ready'|'not_ready', checks: { db: 'ok'|'error', redis: 'ok'|'error', chain: 'ok'|'error'|'skipped' } }. Returns 200 if status='ready', 503 if 'not_ready'. Used as Kubernetes readiness probe.",
+      "Step 9 - GET /health/detailed: Auth: operator. Deep health: includes pool stats (active_connections, idle_connections), Redis memory_used_mb, chain block number and lag, background task statuses (recent heartbeat_monitor run, status_list_publisher last run). Returns 200 with full diagnostic JSON.",
+      "Step 10 - Cardinality Discipline: endpoint_slug labels must use route template (e.g. 'POST /api/v1/sentinels/{sentinel_id}/credentials') not the actual URL. DIDs and JTIs must never appear in metric labels. Audit: run prometheus-client-check or unit test that asserts no label contains a UUID or DID-like string."
+    ],
+    "project_structure": {
+      "files": {
+        "services/discovery/src/discovery/metrics.py": "All Prometheus metric definitions",
+        "services/discovery/src/discovery/telemetry/tracing.py": "OTel SDK init and manual span utilities",
+        "services/discovery/src/discovery/api/v1/routers/health.py": "Live, ready, detailed health endpoints"
+      }
+    },
+    "api_endpoints": [
+      {
+        "method": "GET",
+        "path": "/health/live",
+        "auth": "none",
+        "response_200": { "status": "ok", "service": "discovery", "version": "0.5.0", "uptime_seconds": 3600 }
+      },
+      {
+        "method": "GET",
+        "path": "/health/ready",
+        "auth": "none",
+        "response_200": { "status": "ready", "checks": { "db": "ok", "redis": "ok", "chain": "ok" } },
+        "response_503": { "status": "not_ready", "checks": { "db": "ok", "redis": "error", "chain": "skipped" } }
+      },
+      {
+        "method": "GET",
+        "path": "/metrics",
+        "auth": "none (network-protected)",
+        "response": "Prometheus text format"
+      }
+    ],
+    "security_constraints": [
+      "No secrets, tokens, DIDs, IPs, or user IDs in span attributes or metric labels",
+      "/health/ready must not expose internal error messages in response body — only 'ok'|'error' per check",
+      "/metrics endpoint must be restricted to internal network via Kubernetes NetworkPolicy — not internet-accessible",
+      "OTel exporter uses gRPC TLS when OTLP_INSECURE=false (default in prod)"
+    ]
+  },
+  "dependencies": ["TASK-012", "TASK-021"],
+  "acceptance_criteria": [
+    "GET /health/live returns 200 within 50ms",
+    "GET /health/ready returns 503 when DB is intentionally stopped (integration test)",
+    "After 100 POST /sentinels/onboard requests: http_requests_total counter shows count=100 for that endpoint slug",
+    "OTel trace appears in Jaeger/OTLP backend for credential issuance flow (manual span not just auto)",
+    "No metric label contains a string matching DID or UUID pattern (unit test)"
+  ]
+}

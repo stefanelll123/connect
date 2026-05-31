@@ -1,0 +1,149 @@
+{
+  "id": "TASK-008",
+  "title": "Multi-Instance and Sentinel Migration Specification with Identity Continuity and Re-enrollment",
+  "component": "security",
+  "status": "not-started",
+  "description": "Define the mechanisms that enable: (a) multiple Sentinel instances for the same service (load distribution / HA), (b) VM/host migration without identity change, (c) re-registration/rejoin with the same DID and credentials, (d) controlled key rotation with rolling window. This is the specification that governs TASK-039, TASK-048, and TASK-049.",
+  "objectives": [
+    "Horizontal scaling without changing the exposed DID (DID remains constant)",
+    "VM/host migration with the same DID via shared secret storage (Vault/KMS) or encrypted backup",
+    "Safe re-enrollment after incident or key rotation"
+  ],
+  "implementation_guidance": {
+    "overview": "The core model is: one logical DID per (service_id, role, env) tuple. This DID is shared across all instances of the same service/role/env. Instances are differentiated by an ephemeral instance_id (UUID) used only for observability and heartbeat tracking. The DID private key is stored in a shared secret backend (Vault/KMS for prod, encrypted local file for dev).",
+    "steps": [
+      "Step 1 - Identity Model: Define the DID as scoped to (service_id, role, env). All instances of 'citizen-data-service / PRODUCER / prod' share the same DID and the same private key (accessed via Vault). Instance_id is a UUID4 generated at container/process startup, stored only in memory and in heartbeat records — never in the DID document or credentials.",
+      "Step 2 - Key Backend: Two backend modes. MODE_VAULT (production): Ed25519 private key stored as Vault KV secret at path sentinels/{service_id}/{role}/{env}/did_private_key. Access via AppRole or Kubernetes auth. Key is read at startup and cached in-memory (not written to disk). MODE_LOCAL (development/single-host): Ed25519 private key stored in an AES-256-GCM encrypted JSON file at path {data_dir}/keys/{service_id}-{role}-{env}.key.enc. Master key derived from ENV_SECRET_KEY environment variable using scrypt (N=32768, r=8, p=1).",
+      "Step 3 - Instance Registration (Rejoin): When a new instance starts, it: (1) Reads the DID private key from the backend. (2) Derives the DID from the public key. (3) Calls Discovery /api/v1/sentinels/rejoin with: {did, instance_id, service_id, role, env, endpoint_url, proof: <PoP over challenge>}. (4) Discovery verifies PoP matches the existing sentinel DID record. (5) Discovery updates sentinel_instances table: upsert {sentinel_id, instance_id, endpoint_url, last_seen=now, status=ACTIVE}. (6) Instance begins heartbeat loop.",
+      "Step 4 - Multi-Instance Endpoint Publication: Each instance publishes its own endpoint_url. The ServiceDescriptor (TASK-032) contains an endpoints array. When a new instance connects: Discovery updates the ServiceDescriptor's endpoint list. When an instance disconnects/decommissions: Discovery removes its endpoint from the list after TTL expiry.",
+      "Step 5 - Key Rotation Procedure: (1) Pre-rotation: all instances are running with old key K1. (2) Admin triggers rotation via Discovery API POST /api/v1/sentinels/{id}/rotate-key. (3) Discovery generates new key K2, stores in Vault as current version, keeps K1 as previous version. (4) Discovery sets sentinel state = KEY_ROTATING with grace_period_end = now + grace_seconds (default 600s). (5) During grace period: Producer Sentinels accept VPs signed with EITHER K1 or K2 (verify kid in JWS header). (6) Discovery re-issues all credentials (VCs) with K2 as the new subject key. (7) Instances running with K1 fetch updated config bundle containing K2 (TASK-040) and hot-reload keys. (8) After grace_period_end: K1 is rejected, Discovery revokes old VCs.",
+      "Step 6 - VM Migration Procedure (Single Instance): (1) Admin creates migration_ticket (TASK-005) via discovery UI. (2) Operator copies to new host (out-of-band secure channel). (3) In MODE_VAULT: new host just reads key from Vault — no file transfer needed. (4) In MODE_LOCAL: operator copies the encrypted key file to new host using secure file transfer (not email, not plain HTTP). (5) New Sentinel runs onboarding/rejoin using migration_ticket. (6) Old Sentinel is decommissioned (TASK-033).",
+      "Step 7 - Encrypted Backup (MODE_LOCAL dev only): sentinelctl backup --passphrase produces a file {sentinel_id}.wallet.bak. Contents: AES-256-GCM encrypted JSON containing {service_id, role, env, did, private_key_hex, vc_metadata (no VC payloads), key_version}. Master key = scrypt(passphrase, salt=random_16_bytes). File includes checksum (HMAC-SHA256). sentinelctl restore --file --passphrase loads and verifies checksum before restoring.",
+      "Step 8 - Graceful Shutdown: Before process termination, instance sends DELETE /api/v1/sentinels/instances/{instance_id} or marks itself DRAINING via heartbeat status. Discovery removes its endpoint from the ServiceDescriptor immediately. Kubernetes preStop hook should call sentinelctl drain --timeout=30s."
+    ],
+    "project_structure": {
+      "files": [
+        "docs/protocols/multi-instance-migration.md — specification document",
+        "docs/protocols/key-rotation-procedure.md — step-by-step rotation runbook",
+        "services/sentinel/sentinelctl/commands/init.py — DID initialization command",
+        "services/sentinel/sentinelctl/commands/backup.py — encrypted backup command",
+        "services/sentinel/sentinelctl/commands/restore.py — restore from backup command",
+        "services/sentinel/sentinelctl/commands/rotate_key.py — trigger key rotation",
+        "services/sentinel/sentinelctl/commands/rejoin.py — manual rejoin command",
+        "services/sentinel/sentinelctl/commands/drain.py — graceful drain command",
+        "libs/common/secret_storage/key_backend.py — abstraction for Vault/local key storage",
+        "tests/integration/test_multi_instance.py",
+        "tests/integration/test_key_rotation.py",
+        "tests/integration/test_migration.py"
+      ]
+    },
+    "api_endpoints": {
+      "rejoin": {
+        "method": "POST",
+        "path": "/api/v1/sentinels/rejoin",
+        "auth": "mTLS + proof",
+        "description": "Register a new instance of an existing Sentinel",
+        "request_body": {
+          "did": "string — Sentinel DID",
+          "instance_id": "string(UUID4)",
+          "service_id": "string",
+          "role": "PRODUCER | CONSUMER",
+          "env": "dev | test | prod",
+          "endpoint_url": "string — HTTPS URL this instance listens on",
+          "proof": "string(JWT) — PoP proof signed with DID key"
+        },
+        "responses": {
+          "200": {
+            "sentinel_id": "string(UUID)",
+            "instance_id": "string(UUID)",
+            "config_version": "integer",
+            "bundle": "SignedConfigBundle"
+          },
+          "401": "PROOF_INVALID | DID_NOT_FOUND",
+          "409": "INSTANCE_ID_CONFLICT"
+        }
+      },
+      "rotate_key": {
+        "method": "POST",
+        "path": "/api/v1/sentinels/{sentinel_id}/rotate-key",
+        "auth": "RBAC: security-admin",
+        "request_body": {
+          "reason": "string — required",
+          "grace_period_seconds": "integer — default 600, range 60-3600"
+        },
+        "responses": {
+          "202": {
+            "rotation_id": "string(UUID)",
+            "grace_period_end": "string(ISO 8601)",
+            "new_key_version": "integer"
+          },
+          "409": "ROTATION_ALREADY_IN_PROGRESS"
+        }
+      },
+      "delete_instance": {
+        "method": "DELETE",
+        "path": "/api/v1/sentinels/instances/{instance_id}",
+        "auth": "mTLS (Sentinel auth)",
+        "responses": {
+          "204": "Instance deregistered",
+          "404": "INSTANCE_NOT_FOUND"
+        }
+      }
+    },
+    "domain_entities": {
+      "SentinelInstance": {
+        "fields": [
+          "sentinel_id: UUID — FK to sentinels table",
+          "instance_id: UUID — per-process unique ID",
+          "endpoint_url: str — HTTPS URL",
+          "status: Literal['ACTIVE', 'DRAINING', 'DEAD']",
+          "last_seen: datetime",
+          "version: str — sentinel application version",
+          "env: Literal['dev','test','prod']",
+          "registered_at: datetime"
+        ]
+      },
+      "KeyRotationEvent": {
+        "fields": [
+          "rotation_id: UUID",
+          "sentinel_id: UUID",
+          "old_key_version: int",
+          "new_key_version: int",
+          "grace_period_end: datetime",
+          "status: Literal['IN_PROGRESS','COMPLETED','FAILED']",
+          "initiated_by: str — admin actor ID",
+          "reason: str",
+          "created_at: datetime",
+          "completed_at: Optional[datetime]"
+        ]
+      }
+    },
+    "security_constraints": [
+      "Shared DID key in Vault MUST use Vault namespacing: separate path per (service_id, role, env) — no sharing across services",
+      "Encrypted backup in MODE_LOCAL is for break-glass only — operators must be warned that this is a last-resort mechanism",
+      "Grace period during key rotation MUST be enforced: after grace_period_end, old key MUST be rejected with no exceptions",
+      "The instance_id MUST NOT appear in any signed artifact (VCs, ProofClaims) — it is purely an operational identifier",
+      "Migration ticket MUST be single-use and have a maximum TTL of 30 minutes"
+    ]
+  },
+  "technical_requirements": [
+    "HashiCorp Vault KV v2 API for production key storage",
+    "AES-256-GCM for local key file encryption (Python cryptography library)",
+    "scrypt for password-based key derivation (N=32768, r=8, p=1)",
+    "PostgreSQL for sentinel_instances table with last_seen tracking",
+    "Redis for grace-period key version cache during rotation"
+  ],
+  "dependencies": [
+    "TASK-005",
+    "TASK-006",
+    "TASK-007"
+  ],
+  "acceptance_criteria": [
+    "Multi-instance specification document exists with complete identity model",
+    "Vault and local key backends are defined with exact paths and access patterns",
+    "Key rotation procedure has enumerated steps with grace window logic documented",
+    "Grace period: both old and new keys are accepted during the window; old key is rejected after",
+    "Encrypted backup produces a file that can restore the sentinel DID identity identically",
+    "Rejoin endpoint is idempotent: calling it twice with the same instance_id returns the same response"
+  ]
+}

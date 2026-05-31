@@ -1,0 +1,95 @@
+{
+  "id": "TASK-057",
+  "title": "Discovery UI: Bootstrap React + Material UI, Routing, OIDC Auth Integration, Typed API Client",
+  "component": "discovery_ui",
+  "status": "pending",
+  "description": "Initialize the Discovery Service web UI as a React single-page application using Vite, Material UI (MUI), React Router, and TypeScript. Integrate OIDC/JWT authentication with redirect-based flow, token storage in memory (with refresh token in httpOnly cookie), and protected route enforcement. Implement a typed API client (Axios or Fetch wrapper) with auth header injection and controlled retry. Set up the application shell: sidebar navigation, top bar, and placeholder pages for all major sections.",
+  "objectives": [
+    "Create React + TypeScript + Vite project under discovery-ui/",
+    "Integrate Material UI with custom theme matching project branding",
+    "Implement OIDC redirect auth flow: login, callback, refresh, protected routes",
+    "Store access token in memory (React state/context), refresh token in httpOnly cookie",
+    "Implement typed API client with Bearer token injection and 401 auto-refresh",
+    "Application shell: sidebar with pages Services, Sentinels, Credentials, Revocations, Chain, Audit"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      {
+        "step": 1,
+        "title": "Project initialization and toolchain",
+        "detail": "Run: `npm create vite@latest discovery-ui -- --template react-ts`. Install dependencies: `npm install @mui/material @mui/icons-material @emotion/react @emotion/styled react-router-dom axios oidc-client-ts react-oidc-context`. Install dev deps: `npm install -D vitest @testing-library/react @testing-library/jest-dom msw`. Project structure: `discovery-ui/src/` with subdirs: `api/`, `auth/`, `components/`, `pages/`, `theme/`, `types/`. TypeScript strict mode in `tsconfig.json`. ESLint + Prettier config: `npm install -D eslint @typescript-eslint/eslint-plugin prettier`."
+      },
+      {
+        "step": 2,
+        "title": "Configure OIDC authentication",
+        "detail": "Use `oidc-client-ts` with `react-oidc-context`. Config in `src/auth/oidcConfig.ts`: `{authority: VITE_OIDC_AUTHORITY, client_id: VITE_OIDC_CLIENT_ID, redirect_uri: window.location.origin + '/auth/callback', post_logout_redirect_uri: window.location.origin, scope: 'openid profile email', response_type: 'code', automaticSilentRenew: true}`. Wrap app in `<AuthProvider authServerSettings={oidcConfig}>`. Use `useAuth()` hook to access `user`, `signinRedirect()`, `signoutRedirect()`. On silent renew failure: force re-login. Store access_token in OIDC library's in-memory store (not localStorage). Refresh token handling: configure PKCE flow — refresh is handled by `automaticSilentRenew` via hidden iframe or the OIDC library's built-in mechanism."
+      },
+      {
+        "step": 3,
+        "title": "Implement protected route component",
+        "detail": "Component `ProtectedRoute` in `src/auth/ProtectedRoute.tsx`. Logic: `const { isAuthenticated, isLoading, signinRedirect } = useAuth()`. If `isLoading`: render `<CircularProgress/>`. If not `isAuthenticated`: call `signinRedirect()` and render null (redirect in progress). Otherwise: render `<Outlet/>`. Wrap all application routes in `<ProtectedRoute>`. Add auth callback route `GET /auth/callback` that calls `useAuth().signinCallback()` (OIDC library handles code exchange). Render loading spinner during callback processing."
+      },
+      {
+        "step": 4,
+        "title": "Implement typed API client",
+        "detail": "File `src/api/client.ts`. Create Axios instance: `const apiClient = axios.create({baseURL: import.meta.env.VITE_API_BASE_URL, timeout: 30000})`. Request interceptor: inject `Authorization: Bearer {user?.access_token}` if user is authenticated. Response interceptor: on 401, attempt silent token refresh via `oidcContext.signinSilent()`, then retry original request once. On second 401: redirect to login. Response interceptor: on network error, throw typed `ApiError` with `{status, code, message}`. Generate typed API functions: `src/api/services.ts` (service CRUD), `src/api/sentinels.ts` (sentinel management), `src/api/credentials.ts`, `src/api/revocations.ts`, `src/api/chain.ts`, `src/api/audit.ts`. Each file exports async functions returning typed response objects."
+      },
+      {
+        "step": 5,
+        "title": "Create MUI theme",
+        "detail": "File `src/theme/theme.ts`. `createTheme({palette: {mode: 'light', primary: {main: '#1565C0'}, secondary: {main: '#0288D1'}, error: {main: '#C62828'}}, typography: {fontFamily: 'Inter, Roboto, sans-serif'}, components: {MuiTableCell: {styleOverrides: {head: {fontWeight: 600}}}}})`. Export `AppThemeProvider` wrapping `<ThemeProvider theme={theme}><CssBaseline/>{children}</ThemeProvider>`. Apply in `App.tsx`. Define status chip colors: green=active, orange=degraded, red=offline/revoked, grey=expired."
+      },
+      {
+        "step": 6,
+        "title": "Implement application shell",
+        "detail": "File `src/components/AppShell.tsx`. Layout: `Box sx={{display: 'flex'}}` with `Drawer` (permanent, width 240) + `Box component='main'` for content. Drawer content: `List` with `ListItemButton` items for: Services (/services), Sentinels (/sentinels), Credentials (/credentials), Revocations (/revocations), Chain (/chain), Audit (/audit). Active route highlight via `useLocation()`. Top bar: `AppBar` with breadcrumb (current page name) and user menu (avatar dropdown with Logout). Logout calls `signoutRedirect()`. Responsive: drawer collapses to hamburger on mobile (< 768px breakpoint)."
+      },
+      {
+        "step": 7,
+        "title": "Define page placeholders and routes",
+        "detail": "File `src/App.tsx`. Routes (using `createBrowserRouter`): `/` redirects to `/services`. `/auth/callback` → `AuthCallbackPage`. Protected routes nested under `<ProtectedRoute>`: `/services` → `ServicesPage`, `/sentinels` → `SentinelsPage`, `/credentials` → `CredentialsPage`, `/revocations` → `RevocationsPage`, `/chain` → `ChainPage`, `/audit` → `AuditPage`. Each page file has a placeholder implementation (`UnderConstruction` component) until TASK-058/059/060 implement the full pages."
+      },
+      {
+        "step": 8,
+        "title": "Environment configuration",
+        "detail": "File `.env.example`: `VITE_API_BASE_URL=http://localhost:8000/api/v1`, `VITE_OIDC_AUTHORITY=http://localhost:8001/realms/discovery`, `VITE_OIDC_CLIENT_ID=discovery-ui`. Actual values in `.env.local` (gitignored). For Kubernetes: inject these as ConfigMap env vars mounted by the frontend deployment. Build command: `npm run build` outputs to `dist/` — serve with nginx (TASK-061). In `vite.config.ts`: configure proxy for dev: `proxy: {'/api': 'http://localhost:8000'}` to avoid CORS in development."
+      },
+      {
+        "step": 9,
+        "title": "Tests",
+        "detail": "Test file: `src/auth/ProtectedRoute.test.tsx`. Using Vitest + @testing-library/react + MSW for API mocking. Cases: (1) unauthenticated user redirected to OIDC provider; (2) authenticated user sees protected content; (3) API client injects Bearer token in request header; (4) 401 response triggers silent token refresh and retry; (5) second 401 after refresh triggers logout redirect; (6) AppShell renders all 6 sidebar links; (7) active route highlighted in sidebar. Use `AuthProvider` with mock `userManager` for auth state control."
+      }
+    ]
+  },
+  "project_structure": {
+    "files": {
+      "discovery-ui/package.json": "Dependencies and scripts",
+      "discovery-ui/vite.config.ts": "Vite configuration with proxy",
+      "discovery-ui/tsconfig.json": "TypeScript strict mode config",
+      "discovery-ui/src/App.tsx": "Root component with routes",
+      "discovery-ui/src/auth/oidcConfig.ts": "OIDC configuration",
+      "discovery-ui/src/auth/ProtectedRoute.tsx": "Protected route component",
+      "discovery-ui/src/api/client.ts": "Axios client with interceptors",
+      "discovery-ui/src/api/services.ts": "Services API functions",
+      "discovery-ui/src/theme/theme.ts": "MUI theme definition",
+      "discovery-ui/src/components/AppShell.tsx": "Navigation shell",
+      "discovery-ui/.env.example": "Environment variable template"
+    }
+  },
+  "security_constraints": [
+    "Access token stored in memory only (React context/OIDC library) — never in localStorage or sessionStorage to prevent XSS token theft",
+    "PKCE code_challenge used in OIDC auth flow — authorization code not reusable",
+    "API client retry limited to 1 refresh attempt — prevents infinite loop on persistent 401",
+    "OIDC authority URL is env-configured — hardcoded authority URLs are a security misconfiguration risk",
+    "All API calls use HTTPS in non-dev environments — enforced via Axios baseURL config and HSTS"
+  ],
+  "dependencies": ["TASK-023", "TASK-024", "TASK-009"],
+  "acceptance_criteria": [
+    "Authentication flow completes: login → OIDC redirect → callback → protected pages accessible",
+    "API client correctly injects Bearer token on all requests",
+    "401 response triggers one silent refresh attempt, then logout on persistent 401",
+    "All 6 sidebar navigation items render and route correctly",
+    "Application shell is responsive (drawer collapses on mobile)",
+    "All 7 test cases pass"
+  ]
+}

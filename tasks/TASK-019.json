@@ -1,0 +1,65 @@
+{
+  "id": "TASK-019",
+  "title": "Smart Contract Testing: Unit Tests, Invariant Tests, and Slither Static Analysis",
+  "component": "contracts",
+  "status": "not-started",
+  "description": "Write comprehensive tests for all four registry contracts using Hardhat + Chai + ethers.js. Include unit tests for all contract functions, invariant/property tests, and integrate Slither static analysis as a CI gate. Target 100% branch coverage for all registry contracts.",
+  "objectives": [
+    "100% branch coverage for all four registry contracts",
+    "Invariant tests: properties that must hold after any sequence of valid operations",
+    "Slither passes with zero high/medium severity findings",
+    "Gas benchmarks documented for all state-changing functions"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      "Step 1 - Test Structure: One test file per contract: test/IssuerRegistry.test.ts, test/TrustPolicyRegistry.test.ts, test/StatusRegistry.test.ts, test/ServiceRegistry.test.ts. Plus: test/integration/RegistryInteraction.test.ts for cross-contract scenarios.",
+      "Step 2 - Test Fixtures (Hardhat v2 loadFixture): deployIssuerRegistryFixture(), deployAllRegistriesFixture(). Use ethers.getSigners() for admin, user1, user2 accounts. Load fixtures with loadFixture to reset state between tests efficiently.",
+      "Step 3 - IssuerRegistry Tests: (1) registerIssuer: valid input emits IssuerRegistered; (2) duplicate DID reverts IssuerAlreadyRegistered; (3) non-admin reverts AccessControlUnauthorizedAccount; (4) revokeIssuer: emits IssuerRevoked, isIssuerActive returns false; (5) update after revoke reverts; (6) getIssuerCount after 3 registrations == 3; (7) getIssuerAtIndex enumerates correctly.",
+      "Step 4 - TrustPolicyRegistry Tests: (1) createPolicy with valid issuers; (2) createPolicy with unregistered issuer reverts UnknownIssuer; (3) updatePolicy increments version and saves history; (4) getPolicyHistory returns all versions; (5) isIssuerAllowedForService returns correct boolean; (6) deactivatePolicy sets active=false.",
+      "Step 5 - StatusRegistry Tests: (1) publishStatusAnchor stores anchor, emits event; (2) update anchor with same issuer+index overwrites; (3) verifyStatusAnchor returns false for wrong hash; (4) freshnessDeltaSeconds=59 reverts InvalidFreshnessDelta; (5) emitEmergencyRevocation emits event, no state change; (6) non-revocation-admin reverts.",
+      "Step 6 - ServiceRegistry Tests: (1) registerService for producer and consumer; (2) invalid role reverts InvalidRole; (3) getServicesByRole returns filtered list; (4) http:// URL on local chain (chainId 31337) is allowed; (5) deregisterService removes from role index; (6) updateService changes baseUrl.",
+      "Step 7 - Invariant Tests (property-based): Use Hardhat's stateful fuzzing or implement manually: (1) IssuerRegistry: isIssuerActive(did) == true implies did is in _issuerKeys array; (2) TrustPolicyRegistry: current policy version > all history versions; (3) StatusRegistry: stored credentialHash matches the one passed to publishStatusAnchor; (4) ServiceRegistry: deregistered service never returned by getServicesByRole.",
+      "Step 8 - Gas Benchmarks: Create test/gas/GasBenchmarks.test.ts. Record gas usage for: registerIssuer (target <80K), revokeIssuer (target <40K), publishStatusAnchor (target <60K), registerService (target <80K). Assert gas usage does not exceed target. This prevents gas regression.",
+      "Step 9 - Slither Integration: Install slither-analyzer (pip install slither-analyzer). Run: slither contracts/ --filter-paths '@openzeppelin' --checklist --markdown-root . > slither-report.md. Add Makefile target: analyze-contracts. CI fails if slither reports HIGH severity findings. MEDIUM findings require justification in .slither.config.json.",
+      "Step 10 - Coverage Report: npx hardhat coverage --network hardhat. Target: 100% branch coverage. Add badge to README. CI fails if coverage drops below 95%."
+    ],
+    "project_structure": {
+      "files": {
+        "contracts/test/IssuerRegistry.test.ts": "",
+        "contracts/test/TrustPolicyRegistry.test.ts": "",
+        "contracts/test/StatusRegistry.test.ts": "",
+        "contracts/test/ServiceRegistry.test.ts": "",
+        "contracts/test/integration/RegistryInteraction.test.ts": "",
+        "contracts/test/gas/GasBenchmarks.test.ts": "",
+        "contracts/.slither.config.json": "Slither configuration/filters",
+        "contracts/slither-report.md": "Generated Slither output (committed)"
+      }
+    },
+    "security_constraints": [
+      "Slither HIGH findings must be zero — any finding must be fixed or explicitly documented as a false positive",
+      "Gas benchmarks must be enforced in CI — prevents gas regression from code changes",
+      "Test accounts must use Hardhat's predictable test accounts — never use external/funded accounts in tests"
+    ]
+  },
+  "technical_requirements": [
+    "Hardhat 2.22.x",
+    "hardhat-gas-reporter",
+    "solidity-coverage",
+    "slither-analyzer (Python)",
+    "ethers.js v6"
+  ],
+  "dependencies": [
+    "TASK-014",
+    "TASK-015",
+    "TASK-016",
+    "TASK-017",
+    "TASK-018"
+  ],
+  "acceptance_criteria": [
+    "npx hardhat test passes (all test suites)",
+    "npx hardhat coverage reports >= 95% branch coverage",
+    "slither reports zero HIGH severity findings",
+    "Gas benchmark assertions pass for all state-changing functions",
+    "Invariant properties verified for all four contracts"
+  ]
+}

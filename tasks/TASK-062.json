@@ -1,0 +1,119 @@
+{
+  "id": "TASK-062",
+  "title": "Kubernetes/Helm Charts: Discovery, Sentinel Deployments, HPA, Vault Integration, mTLS, PodSecurity",
+  "component": "infra/k8s",
+  "status": "pending",
+  "description": "Create production-grade Helm charts for the Discovery Service, Discovery UI, and Sentinel. Implement readiness/liveness probes, resource requests and limits, HPA for Sentinel, Vault Agent Injector for secret injection, mTLS certificate mounts, and PodSecurity constraints (runAsNonRoot, readOnlyRootFilesystem, drop ALL capabilities). Provide environment-specific values files for dev, staging, and prod.",
+  "objectives": [
+    "Helm chart for Discovery Service (Deployment, Service, Ingress, HPA, ConfigMap)",
+    "Helm chart for Sentinel (Deployment, Service, PersistentVolumeClaim for sentinel-home, HPA)",
+    "Vault Agent Injector annotations for secret injection (DB creds, JWT signing key, OIDC secret)",
+    "mTLS: mount TLS certs into Discovery and Sentinels via cert-manager Certificate resources",
+    "PodSecurity: enforce Restricted profile via PodSecurityContext on all workloads",
+    "Per-environment values files: dev.values.yaml, staging.values.yaml, prod.values.yaml"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      {
+        "step": 1,
+        "title": "Helm chart structure",
+        "detail": "Create `infra/helm/discovery/` with standard layout: `Chart.yaml` (apiVersion: v2, version: 0.1.0, appVersion: tied to app version), `values.yaml`, `values-dev.yaml`, `values-staging.yaml`, `values-prod.yaml`, and `templates/` containing: `deployment.yaml`, `service.yaml`, `ingress.yaml`, `hpa.yaml`, `configmap.yaml`, `serviceaccount.yaml`, `networkpolicy.yaml`. Same structure under `infra/helm/sentinel/`. Helm chart names: `sentinel-discovery` and `sentinel-node`."
+      },
+      {
+        "step": 2,
+        "title": "Discovery Service Deployment template",
+        "detail": "File: `infra/helm/discovery/templates/deployment.yaml`. apiVersion: apps/v1, kind: Deployment. replicas: from values (default 2 for HA). Image: `{{ .Values.image.registry }}/{{ .Values.image.repository }}:{{ .Values.image.tag }}`. imagePullPolicy: Always. `securityContext` at Pod level: `runAsNonRoot: true`, `runAsUser: 1001`, `fsGroup: 1001`, `seccompProfile: {type: RuntimeDefault}`. Container `securityContext`: `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`, `capabilities: {drop: [ALL]}`. `resources.requests`: cpu: 250m, memory: 256Mi. `resources.limits`: cpu: 1000m, memory: 512Mi. Mounts: `/tmp` as emptyDir (required for temp files since root fs is read-only), `/sentinel-certs` for mTLS certs (from cert-manager secret), `/vault/secrets` for Vault-injected secrets."
+      },
+      {
+        "step": 3,
+        "title": "Readiness and liveness probes",
+        "detail": "Discovery container probes: `livenessProbe`: httpGet path: /health/live, port: 8000, initialDelaySeconds: 30, periodSeconds: 10, failureThreshold: 3. `readinessProbe`: httpGet path: /health/ready, port: 8000, initialDelaySeconds: 15, periodSeconds: 5, failureThreshold: 2. Note: `/health/ready` returns 503 if DB connection pool exhausted or blockchain RPC unavailable (degrade mode). Sentinel container probes: livenessProbe: httpGet /api/v1/health/live, port: 8080. readinessProbe: httpGet /api/v1/health/ready, port: 8080. Sentinel ready when: DID initialized, credentials loaded, trust cache populated (at least from disk cache). `startupProbe`: httpGet /health/live, failureThreshold: 30, periodSeconds: 5 — allows 150s startup window for Vault secret injection."
+      },
+      {
+        "step": 4,
+        "title": "HPA for Sentinel",
+        "detail": "File: `infra/helm/sentinel/templates/hpa.yaml`. apiVersion: autoscaling/v2. spec.scaleTargetRef: Deployment/sentinel. minReplicas: `{{ .Values.hpa.minReplicas }}` (default 2). maxReplicas: `{{ .Values.hpa.maxReplicas }}` (default 10). metrics: CPU utilization averageUtilization: 60. AND custom metric: `sentinel_inbound_requests_pending > 100` via Prometheus Adapter and HPA external metric. For Discovery Service HPA: minReplicas: 2, maxReplicas: 6, CPU target: 70%. When scaling Sentinel in multi-instance mode (TASK-048): each new replica MUST fetch shared DID key from Vault (not local file) — enforced by `SENTINEL_VAULT_ENABLED=true` in env."
+      },
+      {
+        "step": 5,
+        "title": "Vault Agent Injector configuration",
+        "detail": "Add annotations to pod template in both Discovery and Sentinel deployments (when Vault integration enabled via `vault.enabled: true` in values). Annotations: `vault.hashicorp.com/agent-inject: 'true'`. `vault.hashicorp.com/role: 'discovery-service'` or `'sentinel'`. `vault.hashicorp.com/agent-inject-secret-db: 'database/creds/discovery-db'` → writes to `/vault/secrets/db`. `vault.hashicorp.com/agent-inject-template-db`: use Vault template to render `DATABASE_URL=postgresql://{{ .Data.username }}:{{ .Data.password }}@postgres:5432/discovery`. `vault.hashicorp.com/agent-inject-secret-signing-key: 'secret/data/discovery/jwt-key'` → writes to `/vault/secrets/signing-key`. Secret lifecycle: Vault agent auto-renews leases; app reads from file at startup. Alternative (when Vault CSI driver preferred): use `SecretProviderClass` resource instead of annotations."
+      },
+      {
+        "step": 6,
+        "title": "mTLS certificate mounts via cert-manager",
+        "detail": "Prerequisites: cert-manager deployed in cluster. Create `Certificate` resource in `infra/helm/discovery/templates/certificate.yaml`: spec.secretName: `discovery-tls`, spec.dnsNames: [`discovery.sentinel.svc`, `discovery.sentinel.svc.cluster.local`], spec.issuerRef: kind: ClusterIssuer, name: `sentinel-internal-ca`. Same for Sentinel: `sentinel-{{ .Release.Name }}-tls`. Mount in container: volumeMount name: `tls-certs`, mountPath: `/sentinel-certs`, readOnly: true. Volume: secret: secretName: `discovery-tls`. Env vars: `TLS_CERT_FILE=/sentinel-certs/tls.crt`, `TLS_KEY_FILE=/sentinel-certs/tls.key`, `TLS_CA_FILE=/sentinel-certs/ca.crt`. The Discovery Service enforces mTLS on the `/api/` prefix by checking `ssl_check_hostname` and verifying client cert in HTTPSRedirectMiddleware."
+      },
+      {
+        "step": 7,
+        "title": "NetworkPolicy for inter-service isolation",
+        "detail": "File: `infra/helm/discovery/templates/networkpolicy.yaml`. Ingress: allow from Ingress Controller namespace only on port 443 (for external UI). Allow from Sentinel pods (labeled `role: sentinel`) on port 8000. Egress: allow to postgres:5432, redis:6379, blockchain RPC port. Deny all other egress by default. For Sentinel NetworkPolicy: allow egress to Discovery Service port 8000 (or 443 mTLS). Allow egress to producer backend (if consumer mode). Deny ingress from all except Ingress Controller (for UI) and other Sentinels in same service mesh."
+      },
+      {
+        "step": 8,
+        "title": "PersistentVolumeClaim for Sentinel home",
+        "detail": "File: `infra/helm/sentinel/templates/pvc.yaml`. Only created when `persistence.enabled: true` in values (default true for prod, false for dev/ephemeral). storageClassName: `{{ .Values.persistence.storageClass }}` (default: standard). accessModes: ReadWriteOnce. storage: 1Gi. IMPORTANT: PVC is per-instance when Sentinel runs with local key mode. When multi-instance (TASK-048) with Vault key sharing, the PVC still holds the DID document + replay cache disk spillover — but signing key comes from Vault. Mount as `/sentinel-home` in container. `ReadWriteOnce` means multiple replicas CANNOT share the same PVC — each replica has its own PVC via StatefulSet (use StatefulSet instead of Deployment for Sentinel when `persistence.enabled` is true)."
+      },
+      {
+        "step": 9,
+        "title": "Environment-specific values files",
+        "detail": "values.yaml (defaults): replicaCount: 1, image.tag: latest, persistence.enabled: false, vault.enabled: false, hpa.enabled: false, ingress.enabled: false, resources (lower). values-dev.yaml: overrides for local cluster (persistence.enabled: false, hpa.enabled: false, vault.enabled: false, resources minimal). values-staging.yaml: hpa.enabled: true, vault.enabled: true, persistence.enabled: true, ingress.enabled: true with staging hostname. values-prod.yaml: all enabled + stricter resource limits, PodDisruptionBudget minAvailable: 1 (keep at least 1 replica during node drain), Affinity: podAntiAffinity preferred to spread across nodes."
+      }
+    ]
+  },
+  "project_structure": {
+    "files": {
+      "infra/helm/discovery/Chart.yaml": "Helm chart metadata for Discovery Service",
+      "infra/helm/discovery/values.yaml": "Default values (minimal)",
+      "infra/helm/discovery/values-dev.yaml": "Dev environment overrides",
+      "infra/helm/discovery/values-staging.yaml": "Staging environment overrides",
+      "infra/helm/discovery/values-prod.yaml": "Production overrides with HA settings",
+      "infra/helm/discovery/templates/deployment.yaml": "Deployment with PodSecurity, Vault annotations",
+      "infra/helm/discovery/templates/service.yaml": "ClusterIP Service",
+      "infra/helm/discovery/templates/ingress.yaml": "Ingress for UI (optional)",
+      "infra/helm/discovery/templates/hpa.yaml": "HorizontalPodAutoscaler",
+      "infra/helm/discovery/templates/configmap.yaml": "Non-secret config",
+      "infra/helm/discovery/templates/networkpolicy.yaml": "NetworkPolicy",
+      "infra/helm/discovery/templates/certificate.yaml": "cert-manager Certificate",
+      "infra/helm/sentinel/Chart.yaml": "Helm chart metadata for Sentinel",
+      "infra/helm/sentinel/values.yaml": "Default values",
+      "infra/helm/sentinel/templates/statefulset.yaml": "StatefulSet with VolumeClaimTemplate for sentinel-home",
+      "infra/helm/sentinel/templates/hpa.yaml": "HPA with CPU + custom metric",
+      "infra/helm/sentinel/templates/networkpolicy.yaml": "NetworkPolicy"
+    }
+  },
+  "api_endpoints": [
+    {
+      "path": "GET /health/live",
+      "service": "Discovery + Sentinel",
+      "returns": "200 {status: 'ok'} — always 200 unless process is dead"
+    },
+    {
+      "path": "GET /health/ready",
+      "service": "Discovery",
+      "returns": "200 {status: 'ready', db: 'ok', redis: 'ok', chain: 'ok'} or 503 with failing component"
+    },
+    {
+      "path": "GET /api/v1/health/ready",
+      "service": "Sentinel",
+      "returns": "200 {status: 'ready', did_initialized: true, trust_cache: 'populated', credentials: N} or 503"
+    }
+  ],
+  "security_constraints": [
+    "Pod Security Standards: Restricted profile enforced via namespace label `pod-security.kubernetes.io/enforce: restricted`",
+    "ServiceAccount: dedicated SA per component with minimal RBAC (read own configmap only)",
+    "No hostNetwork, hostPID, hostIPC — explicitly set to false in securityContext",
+    "Secrets: never in values.yaml plain text — always from Vault or Kubernetes ExternalSecrets",
+    "PodDisruptionBudget: minAvailable=1 for all prod deployments to prevent full downtime during rolling updates"
+  ],
+  "dependencies": ["TASK-061", "TASK-011", "TASK-036", "TASK-052"],
+  "acceptance_criteria": [
+    "helm lint passes for both charts",
+    "helm template renders valid YAML (validate with kubeval or kubeconform)",
+    "Discovery Deployment starts, passes readiness probe, serves /health/ready: 200",
+    "Sentinel StatefulSet starts, fetches key from Vault (staging), passes readiness probe",
+    "HPA scales Sentinel from 2 → 4 replicas under artificial CPU load in staging",
+    "Network policy blocks direct pod-to-pod access outside allowed routes (validate with network policy tester)",
+    "cosign verify confirms signed image in deploy step before Helm install/upgrade"
+  ]
+}

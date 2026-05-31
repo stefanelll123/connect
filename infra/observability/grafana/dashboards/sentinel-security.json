@@ -1,0 +1,86 @@
+{
+  "uid": "sentinel-security",
+  "title": "Sentinel — Security Incidents",
+  "tags": ["sentinel", "security", "incidents"],
+  "timezone": "browser",
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Issuer Disable Events (24h)",
+      "gridPos": {"x": 0, "y": 0, "w": 6, "h": 4},
+      "targets": [{"refId": "A", "datasource": {"uid": "prometheus"}, "expr": "sum(increase(sentinel_chain_issuer_disabled_total[24h]))"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}},
+      "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}}
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Replay Rejections (5m)",
+      "gridPos": {"x": 6, "y": 0, "w": 6, "h": 4},
+      "targets": [{"refId": "A", "datasource": {"uid": "prometheus"}, "expr": "sum(increase(sentinel_replay_rejections_total[5m]))"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}},
+      "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 5}, {"color": "red", "value": 20}]}}}
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Onboarding Failures (1h)",
+      "gridPos": {"x": 12, "y": 0, "w": 6, "h": 4},
+      "targets": [{"refId": "A", "datasource": {"uid": "prometheus"}, "expr": "sum(increase(discovery_enrollment_failures_total[1h]))"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}},
+      "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 3}, {"color": "red", "value": 10}]}}}
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Proof Verification Failures (5m)",
+      "gridPos": {"x": 18, "y": 0, "w": 6, "h": 4},
+      "targets": [{"refId": "A", "datasource": {"uid": "prometheus"}, "expr": "sum(increase(sentinel_proof_verification_failures_total[5m]))"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}},
+      "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 5}, {"color": "red", "value": 20}]}}}
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Replay Rejections Over Time",
+      "gridPos": {"x": 0, "y": 4, "w": 12, "h": 8},
+      "targets": [{"refId": "A", "datasource": {"uid": "prometheus"}, "expr": "sum(rate(sentinel_replay_rejections_total[5m])) by (reason)", "legendFormat": "{{reason}}"}],
+      "fieldConfig": {"defaults": {"unit": "ops"}}
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Onboarding Failures per Hour",
+      "gridPos": {"x": 12, "y": 4, "w": 12, "h": 8},
+      "targets": [{"refId": "A", "datasource": {"uid": "prometheus"}, "expr": "sum(rate(discovery_enrollment_failures_total[5m])) by (reason) * 3600", "legendFormat": "{{reason}}"}],
+      "fieldConfig": {"defaults": {"unit": "ops", "displayName": "failures/hr"}}
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "VP Validation Failures by Error Code",
+      "gridPos": {"x": 0, "y": 12, "w": 12, "h": 8},
+      "targets": [{"refId": "A", "datasource": {"uid": "prometheus"}, "expr": "sum(rate(sentinel_vp_validation_failures_total[5m])) by (error_code)", "legendFormat": "{{error_code}}"}],
+      "fieldConfig": {"defaults": {"unit": "ops"}}
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Proof Verification Failures by Reason",
+      "gridPos": {"x": 12, "y": 12, "w": 12, "h": 8},
+      "targets": [{"refId": "A", "datasource": {"uid": "prometheus"}, "expr": "sum(rate(sentinel_proof_verification_failures_total[5m])) by (reason)", "legendFormat": "{{reason}}"}],
+      "fieldConfig": {"defaults": {"unit": "ops"}}
+    },
+    {
+      "id": 9,
+      "type": "logs",
+      "title": "Recent Security Error Logs",
+      "gridPos": {"x": 0, "y": 20, "w": 24, "h": 8},
+      "targets": [{"refId": "A", "datasource": {"uid": "loki"}, "expr": "{job=\"sentinel\"} | json | level=\"error\""}],
+      "options": {"showTime": true, "showLabels": false, "showCommonLabels": true, "wrapLogMessage": true, "dedupStrategy": "none", "sortOrder": "Descending"}
+    }
+  ]
+}

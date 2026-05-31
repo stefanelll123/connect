@@ -1,0 +1,63 @@
+@startuml seq-revocation
+title Credential Revocation Flow
+
+actor "Admin" as admin
+participant "Discovery API" as disc
+participant "Discovery DB" as db
+participant "Vault (Discovery)" as vault
+participant "StatusListAnchor\n(Blockchain)" as chain
+participant "Producer Sentinel" as psent
+participant "Redis (Producer)" as redis
+
+== Admin initiates revocation ==
+
+admin -> disc: POST /api/v1/credentials/<jti>/revoke\n{\n  "reason": "SERVICE_DEREGISTERED"\n}\nAuthorization: Bearer <admin-api-key>
+
+disc -> db: SELECT credentials WHERE jti=<jti> AND status=ACTIVE
+db --> disc: credential record\n{ jti, status_list_index=42, status_list_id="list-001" }
+
+disc -> db: SELECT status_lists WHERE id="list-001" FOR UPDATE
+db --> disc: { bitstring_bytes, version=17 }
+
+disc -> disc: Set bit 42 → 1 in bitstring
+
+disc -> vault: Read issuer key for status list signing\nsecret/issuers/prod/signing_key
+vault --> disc: private_key_bytes
+
+disc -> disc: Build BitstringStatusListCredential JWT-VC\nsign with issuer key
+disc -> disc: Compute sha256(new_bitstring)
+
+disc -> chain: statusAnchor.updateHash\n("list-001", new_hash, version+1)
+chain --> disc: txHash
+
+disc -> db: UPDATE status_lists\nSET bitstring=<new>, version=18, updated_at=now()\nSET tx_hash=txHash
+disc -> db: UPDATE credentials SET status=REVOKED WHERE jti=<jti>
+disc -> db: INSERT audit_log\n{ action=VC_REVOKED, target=jti, actor=admin, reason, ts }
+
+disc --> admin: 200 OK\n{\n  "jti": "<jti>",\n  "status": "REVOKED",\n  "effective_at": "ISO8601",\n  "status_list_tx": "<txHash>"\n}
+
+== Producer Sentinel learns about revocation (async, within Δ) ==
+
+note over psent, redis
+  Producer Sentinel refreshes the status list cache
+  on a schedule (every min(Δ/2, 60s) for prod).
+  The next refresh after revocation will pick up the new bit.
+end note
+
+psent -> disc: GET /api/v1/status/list-001
+disc --> psent: BitstringStatusListCredential JWT-VC
+
+psent -> psent: Verify status list signature
+psent -> chain: statusAnchor.getHash("list-001")
+chain --> psent: new_hash
+psent -> psent: sha256(bitstring) == new_hash ✓
+
+psent -> redis: SET status_list:list-001 <new_bitstring> EX <delta>
+redis --> psent: ok
+
+note over psent
+  Next request for jti at status_list_index=42
+  will find bit=1 → HTTP 403 STATUS_REVOKED
+end note
+
+@enduml

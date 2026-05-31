@@ -1,0 +1,193 @@
+{
+  "id": "TASK-005",
+  "title": "Secure Sentinel Onboarding/Re-onboarding Protocol Specification",
+  "component": "security",
+  "status": "not-started",
+  "description": "Define the complete secure enrollment protocol for a Sentinel (producer/consumer) joining the Discovery Service, including prevention of rogue registration, spoofing, replay, and key rotation / re-onboarding after migration. This specification is the source of truth for implementations in both Discovery Service (TASK-026) and Sentinel (TASK-040).",
+  "objectives": [
+    "One-time-use token with short expiry and binding to service/role/env",
+    "Proof of possession (PoP) of the DID key without exposing the private key",
+    "Deterministic re-onboarding for migration and recovery scenarios"
+  ],
+  "implementation_guidance": {
+    "overview": "The onboarding protocol is a two-phase handshake: (1) the admin issues a pre-authorized enrollment token; (2) the Sentinel presents the token plus a proof-of-possession of its DID key. Discovery atomically consumes the token and emits credentials + config. Both sides must implement this protocol identically.",
+    "steps": [
+      "Step 1 - Enrollment Token Structure: The token is a signed JWT issued by Discovery. Header: {alg: 'EdDSA', typ: 'enrollment+jwt', kid: '<Discovery enrollment signing key ID>'}. Payload claims: iss (Discovery service DID), jti (UUIDv4 — the token_id), iat, exp (iat + 600 seconds, configurable), service_id (string, binding to the service being enrolled), role ('PRODUCER'|'CONSUMER'), env ('dev'|'test'|'prod'), nonce (32 random bytes base64url — one-time challenge seed), required_approval (boolean — true for prod environments by default), instance_metadata_constraints (optional object: {cloud_provider: string, region: string, instance_id: string}).",
+      "Step 2 - Pre-onboarding Workflow: Admin calls Discovery API (TASK-025) to create enrollment token. Discovery generates the token, stores hash(token) in DB with status=PENDING. For prod environments, status=PENDING requires a second admin to call /approve. Token plaintext is returned ONCE in the API response and never stored. Admin distributes token to Sentinel operator out-of-band (secure channel).",
+      "Step 3 - Transport Channel: All onboarding calls MUST use mTLS (TLS 1.3 preferred, 1.2 minimum). Discovery's mTLS client certificate validation mode: REQUIRED. Sentinel presents a self-signed or CA-signed certificate for the mTLS handshake. The mTLS certificate is NOT the same as the DID key — it is just for transport security.",
+      "Step 4 - Phase 1 — Challenge Request: Sentinel sends POST /api/v1/sentinels/onboard with body: {enrollment_token: '<JWT>', did: 'did:key:z6Mk...', did_public_key_jwk: {<JWK>}}. Discovery validates: (a) JWT signature using enrollment signing key, (b) JWT not expired, (c) hash(enrollment_token) exists in DB with status=APPROVED, (d) DID is valid format (prefix did:key:). Discovery generates a server_challenge: 32 random bytes base64url. Discovery stores the challenge with TTL=120s in Redis (key: onboard_challenge:{jti}). Discovery returns: {challenge: '<base64url>', expires_in: 120}.",
+      "Step 5 - Phase 2 — Proof Submission: Sentinel signs the challenge to prove key possession. Proof JWT header: {alg: 'EdDSA', typ: 'onboard-proof+jwt', kid: '<DID fragment>'}. Proof claims: iss (Sentinel DID), aud (Discovery DID), iat, exp (iat + 120), token_id (jti from enrollment token), challenge (the challenge value received), nonce (the nonce from the enrollment token). Sentinel signs with DID private key and sends POST /api/v1/sentinels/onboard/complete with body: {enrollment_token: '<JWT>', proof: '<proof JWT compact>'}.",
+      "Step 6 - Discovery Verification: (a) Re-validate enrollment token signature and expiry; (b) Retrieve challenge from Redis using token jti — if missing, return 400 CHALLENGE_EXPIRED; (c) Resolve Sentinel DID: for did:key, derive public key from the DID string itself (no network call); (d) Verify proof JWT signature using derived public key; (e) Verify proof.aud == Discovery DID; (f) Verify proof.challenge matches stored challenge; (g) Verify proof.token_id matches enrollment token jti; (h) Execute atomic DB transaction: mark enrollment_token consumed_at=now(), create/update sentinel record.",
+      "Step 7 - Response Bundle: On successful verification, Discovery returns the onboarding bundle: {sentinel_id: UUID, did: string, role: string, env: string, service_id: string, config_version: integer, bundle: {<signed config bundle — see TASK-027>}, initial_credentials: [<JWT-VC array>], trust_anchors: {chain_network: string, rpc_urls: array<string>, contract_addresses: {issuer_registry: string, trust_policy_registry: string, status_registry: string, service_registry: string}}}.",
+      "Step 8 - Re-onboarding / Migration: When a Sentinel migrates to a new VM, it presents its existing DID key (retrieved from Vault/KMS) plus a migration_ticket (one-time JWT issued by admin via POST /api/v1/sentinels/{id}/migration-ticket). The migration ticket has 30-minute expiry. Protocol is the same as initial onboarding (challenge-response) but uses the existing sentinel DID entry — Discovery updates instance_metadata and last_seen rather than creating a new sentinel record.",
+      "Step 9 - Error Responses: Define exact HTTP status and error codes for all failure modes (see error_handling section)."
+    ],
+    "project_structure": {
+      "files": [
+        "docs/protocols/onboarding-protocol.md — complete specification document",
+        "libs/common/onboarding/__init__.py",
+        "libs/common/onboarding/token.py — enrollment token create/validate",
+        "libs/common/onboarding/proof.py — PoP proof creation and verification",
+        "libs/common/onboarding/models.py — request/response Pydantic models",
+        "tests/unit/onboarding/test_token.py",
+        "tests/unit/onboarding/test_proof.py",
+        "tests/integration/test_onboarding_flow.py"
+      ]
+    },
+    "domain_entities": {
+      "EnrollmentToken": {
+        "description": "JWT issued by Discovery for one-time use during Sentinel onboarding",
+        "jwt_claims": [
+          "iss: string — Discovery DID",
+          "jti: string(UUID) — token ID, unique, used as one-time nonce",
+          "iat: integer — issued at Unix timestamp",
+          "exp: integer — expiry Unix timestamp (iat + 600 default)",
+          "service_id: string — service this sentinel will represent",
+          "role: 'PRODUCER' | 'CONSUMER'",
+          "env: 'dev' | 'test' | 'prod'",
+          "nonce: string(base64url, 32 bytes) — additional entropy",
+          "required_approval: boolean",
+          "instance_metadata_constraints: object | null"
+        ]
+      },
+      "OnboardingProof": {
+        "description": "JWT signed by Sentinel's DID key proving possession",
+        "jwt_claims": [
+          "iss: string — Sentinel DID",
+          "aud: string — Discovery DID",
+          "iat: integer",
+          "exp: integer — iat + 120",
+          "token_id: string — jti from enrollment token",
+          "challenge: string(base64url) — challenge received from Discovery"
+        ]
+      },
+      "OnboardingBundle": {
+        "description": "Response payload after successful onboarding",
+        "fields": [
+          "sentinel_id: string(UUID)",
+          "did: string",
+          "role: string",
+          "env: string",
+          "service_id: string",
+          "config_version: integer",
+          "bundle: SignedConfigBundle — see TASK-027",
+          "initial_credentials: array<string> — JWT-VC strings",
+          "trust_anchors: TrustAnchors"
+        ]
+      },
+      "TrustAnchors": {
+        "fields": [
+          "chain_network: string — e.g. sepolia or local",
+          "chain_id: integer",
+          "rpc_urls: array<string> — at least one, max 3",
+          "contract_addresses: {issuer_registry: string, trust_policy_registry: string, status_registry: string, service_registry: string}"
+        ]
+      }
+    },
+    "api_endpoints": {
+      "onboard_initiate": {
+        "method": "POST",
+        "path": "/api/v1/sentinels/onboard",
+        "description": "Phase 1: Submit enrollment token and DID, receive challenge",
+        "request_body": {
+          "enrollment_token": "string(JWT) — required",
+          "did": "string — required, pattern: ^did:key:z6Mk",
+          "did_public_key_jwk": "object(JWK) — required, crv must be Ed25519"
+        },
+        "responses": {
+          "200": {
+            "challenge": "string(base64url, 32 bytes)",
+            "expires_in": "integer(seconds)",
+            "correlation_id": "string(UUID)"
+          },
+          "400": "ENROLLMENT_TOKEN_INVALID | DID_FORMAT_INVALID | JWK_INVALID",
+          "401": "ENROLLMENT_TOKEN_EXPIRED | ENROLLMENT_TOKEN_NOT_APPROVED",
+          "409": "ENROLLMENT_TOKEN_ALREADY_CONSUMED",
+          "429": "RATE_LIMIT_EXCEEDED"
+        }
+      },
+      "onboard_complete": {
+        "method": "POST",
+        "path": "/api/v1/sentinels/onboard/complete",
+        "description": "Phase 2: Submit PoP proof, receive config bundle",
+        "request_body": {
+          "enrollment_token": "string(JWT) — required",
+          "proof": "string(JWT compact) — required"
+        },
+        "responses": {
+          "200": "OnboardingBundle",
+          "400": "PROOF_INVALID | CHALLENGE_EXPIRED | PROOF_CLAIMS_MISSING",
+          "401": "PROOF_SIGNATURE_INVALID | TOKEN_MISMATCH",
+          "409": "ENROLLMENT_TOKEN_ALREADY_CONSUMED",
+          "429": "RATE_LIMIT_EXCEEDED"
+        }
+      },
+      "create_migration_ticket": {
+        "method": "POST",
+        "path": "/api/v1/sentinels/{sentinel_id}/migration-ticket",
+        "description": "Admin endpoint: issue one-time migration ticket for re-onboarding",
+        "auth": "RBAC: security-admin role required",
+        "request_body": {
+          "reason": "string — required, max 500 chars"
+        },
+        "responses": {
+          "200": {
+            "migration_ticket": "string(JWT)",
+            "expires_in": 1800
+          },
+          "404": "SENTINEL_NOT_FOUND",
+          "403": "INSUFFICIENT_ROLE"
+        }
+      }
+    },
+    "error_handling": {
+      "error_response_format": {
+        "error": "string — machine-readable error code",
+        "message": "string — human-readable, non-sensitive",
+        "correlation_id": "string(UUID)"
+      },
+      "error_codes": [
+        {"code": "ENROLLMENT_TOKEN_INVALID", "http_status": 400, "description": "JWT signature or structure is invalid"},
+        {"code": "ENROLLMENT_TOKEN_EXPIRED", "http_status": 401, "description": "JWT exp claim has passed"},
+        {"code": "ENROLLMENT_TOKEN_NOT_APPROVED", "http_status": 401, "description": "Token exists but status is PENDING — requires approval"},
+        {"code": "ENROLLMENT_TOKEN_ALREADY_CONSUMED", "http_status": 409, "description": "Token has already been used for onboarding"},
+        {"code": "DID_FORMAT_INVALID", "http_status": 400, "description": "DID string does not match expected format"},
+        {"code": "JWK_INVALID", "http_status": 400, "description": "Public key JWK is malformed or wrong curve"},
+        {"code": "CHALLENGE_EXPIRED", "http_status": 400, "description": "The challenge nonce has expired (>120s)"},
+        {"code": "PROOF_SIGNATURE_INVALID", "http_status": 401, "description": "PoP proof JWT signature does not verify"},
+        {"code": "PROOF_INVALID", "http_status": 400, "description": "Proof JWT structure or claims are invalid"},
+        {"code": "TOKEN_MISMATCH", "http_status": 401, "description": "proof.token_id does not match enrollment token jti"},
+        {"code": "RATE_LIMIT_EXCEEDED", "http_status": 429, "description": "Too many onboarding attempts from this IP or token"}
+      ]
+    },
+    "security_constraints": [
+      "Enrollment token MUST be validated and consumed atomically using DB SELECT FOR UPDATE to prevent concurrent replay",
+      "The plaintext enrollment token MUST only be returned once in the creation API response — never stored or re-exposed",
+      "Discovery MUST store only hash(enrollment_token) in the database for verification, never the token itself",
+      "Challenge nonce MUST be stored in Redis with TTL=120s — not in the DB — to ensure it cannot be reused after expiry",
+      "PoP proof exp MUST be <= 120 seconds from iat — proofs with longer TTL MUST be rejected",
+      "mTLS MUST be enforced on the onboarding endpoint — plaintext HTTP MUST be rejected with 400",
+      "Rate limiting: maximum 5 onboarding attempts per enrollment token jti, 10 per IP per minute"
+    ]
+  },
+  "technical_requirements": [
+    "mTLS (TLS 1.3 preferred, TLS 1.2 minimum)",
+    "JWT (JOSE) for enrollment token and proof",
+    "Redis for challenge nonce storage with TTL",
+    "PostgreSQL with SELECT FOR UPDATE for atomic token consumption",
+    "W3C DID Core for PoP conceptual framework"
+  ],
+  "dependencies": [
+    "TASK-003",
+    "TASK-004"
+  ],
+  "acceptance_criteria": [
+    "Complete onboarding protocol specification document exists with all message fields defined",
+    "Enrollment token cannot be used twice — concurrent test with two simultaneous requests proves this",
+    "Discovery rejects onboarding if PoP proof signature is invalid",
+    "Discovery rejects onboarding if enrollment token is expired or not approved",
+    "Challenge nonce expires after 120 seconds and cannot be reused",
+    "Re-onboarding via migration ticket works with the same DID and credentals",
+    "All error codes are defined with HTTP status codes and tested"
+  ]
+}

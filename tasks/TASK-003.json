@@ -1,0 +1,145 @@
+{
+  "id": "TASK-003",
+  "title": "Standards Selection and Crypto Suites for DID/VC/VP, Request Proofs and Revocation",
+  "component": "security",
+  "status": "not-started",
+  "description": "Select and lock the exact standards and interoperability profile for: DID specs, VC data model, securing format, revocation/status mechanism, request signing, and anti-replay. Produce a Standards Profile document with algorithms, media types, and validation rules that engineering teams must follow without further decision-making.",
+  "objectives": [
+    "Standardize the VC/VP format and signing algorithms for consistent implementation",
+    "Establish the revocation mechanism and on-chain anchoring (Bitstring Status List + on-chain hash)",
+    "Lock the request proof mechanism (anti-replay + binding)"
+  ],
+  "implementation_guidance": {
+    "overview": "Produce a Standards Profile document that pins every standard, algorithm, media type, and validation rule used in the system. This document eliminates implementation ambiguity. All library choices and format decisions flow from it.",
+    "steps": [
+      "Step 1 - DID Standard: Adopt W3C DID Core v1.0 as the semantic foundation. Use did:key as the primary DID method for MVP (deterministic, no on-chain overhead, derived from public key). Document exact key derivation: Ed25519 keypair → did:key:z6Mk... using multicodec prefix 0xed01. Reserve did:ethr as the optional method for on-chain resolution. Define the DID Document structure for did:key: no service endpoints, single verificationMethod with type Ed25519VerificationKey2020.",
+      "Step 2 - VC Data Model: Adopt W3C Verifiable Credentials Data Model v2.0. Use the JWT-based securing format (not JSON-LD Proofs). MediaType for JWT-VC: application/vc+jwt. The claim structure must conform to VC DM 2.0 registered claims. Map VC DM 2.0 fields to JWT claims as follows: issuer → iss, credentialSubject.id → sub, validFrom → nbf, validUntil → exp, id → jti, type → vc.type array.",
+      "Step 3 - Securing Mechanism: Use W3C Securing Verifiable Credentials using JOSE and COSE (VC-JOSE-COSE). Profile on JOSE/JWT. Algorithm selection: EdDSA (Ed25519) as the REQUIRED algorithm. ES256 (P-256) as OPTIONAL secondary. Prohibited algorithms: RS256, HS256, and alg:none. Include kid in JOSE header referencing the issuer's verification method ID. MediaType for JWT-VP: application/vp+jwt.",
+      "Step 4 - Revocation/Status: Adopt W3C Bitstring Status List v1.0. StatusListCredential is a JWT-VC with type BitstringStatusListCredential. Each VC must include a credentialStatus claim with: type: BitstringStatusListEntry, statusListCredential: <URL of status list VC>, statusListIndex: <integer>, statusPurpose: revocation (or suspension). The bitstring is base64url-encoded gzip-compressed.",
+      "Step 5 - Request Anti-Replay: Define a ProofClaims object (see TASK-006 for full spec) inspired by RFC 9449 DPoP. Required JWT claims for ProofClaims: iss (Consumer Sentinel DID), aud (Producer Service DID), env (string, must match VC env), iat (Unix timestamp), exp (iat + 30 seconds), jti (UUIDv4, unique per request), req.method (uppercase HTTP method), req.path (URL-decoded path with leading slash), req.query_hash (SHA-256 of raw query string, base64url), req.body_hash (SHA-256 of raw body bytes, base64url; empty string hash if no body), nonce (opaque string issued by producer or Discovery).",
+      "Step 6 - HTTP Integration (Optional Advanced): Define RFC 9421 (HTTP Message Signatures) as the future advanced signing mode for environments with HTTP-aware intermediaries. In MVP, use only the ProofClaims header approach. If RFC 9421 is adopted later, signed components must include: @method, @path, @query, content-digest, content-type.",
+      "Step 7 - Algorithm Matrix: Produce a table listing every algorithm in the system with: Category | Algorithm | Status (REQUIRED/OPTIONAL/PROHIBITED) | JWA Name | Use Case. Include: EdDSA/Ed25519 REQUIRED (DID key generation, VC signing, VP signing, ProofClaims signing), AES-256-GCM REQUIRED (secret storage encryption at rest), HKDF-SHA256 REQUIRED (key derivation from master key), SHA-256 REQUIRED (hash computation for body_hash, query_hash, bitstring verification), scrypt REQUIRED (password-based key derivation for local key storage).",
+      "Step 8 - Validation Rules: Write a deterministic validation procedure for VC verification. Steps in order: (1) Parse JWT header, verify alg is in allowed list; (2) Extract kid, resolve issuer DID document, get verification key; (3) Verify JWT signature; (4) Verify iss matches expected issuer DID; (5) Verify sub is the consumer Sentinel DID; (6) Verify nbf <= now <= exp (with maxClockSkew tolerance); (7) Verify env claim matches expected environment; (8) Verify aud matches producer DID (if present); (9) Fetch statusListCredential, verify its signature, check bit at statusListIndex; (10) Verify issuer is active in IssuerRegistry on-chain. Any step failure must HALT verification and return a specific error code.",
+      "Step 9 - Media Types Summary: Document exact media types for API use: JWT-VC: application/vc+jwt; JWT-VP: application/vp+jwt; ProofClaims JWS: compact serialization, transmitted as Authorization: SentinelProof <jws>; Config Bundle: application/json with JWS envelope; Enrollment Token: application/jwt."
+    ],
+    "project_structure": {
+      "files": [
+        "docs/standards/standards-profile.md — the main standards profile document",
+        "docs/standards/algorithm-matrix.md — algorithm selection table",
+        "docs/standards/vc-validation-procedure.md — step-by-step VC/VP verification algorithm",
+        "docs/standards/media-types.md — registered media types for all artifacts",
+        "libs/common/crypto/__init__.py — Python module implementing algorithm suite",
+        "libs/common/crypto/algorithms.py — constants for alg names and allowed sets",
+        "libs/common/crypto/jws.py — JWS sign/verify utilities",
+        "libs/common/crypto/did_key.py — did:key generation and resolution",
+        "libs/common/crypto/hashing.py — SHA-256 utilities for body_hash, query_hash"
+      ]
+    },
+    "domain_entities": {
+      "AlgorithmProfile": {
+        "fields": [
+          "category: string — e.g., DID Signing",
+          "algorithm: string — e.g., EdDSA",
+          "jwa_name: string — e.g., EdDSA",
+          "status: enum — REQUIRED | OPTIONAL | PROHIBITED",
+          "use_cases: array<string>"
+        ]
+      },
+      "VCValidationResult": {
+        "fields": [
+          "valid: boolean",
+          "error_code: string | null — enum: VC_EXPIRED, ISSUER_UNTRUSTED, STATUS_REVOKED, INVALID_SIGNATURE, SCHEMA_INVALID, ENV_MISMATCH, AUD_MISMATCH, DID_UNRESOLVABLE",
+          "error_detail: string | null — human-readable, non-sensitive",
+          "verified_at: string — ISO 8601 UTC timestamp"
+        ]
+      }
+    },
+    "data_structures": {
+      "jwt_vc_header_example": {
+        "alg": "EdDSA",
+        "typ": "vc+jwt",
+        "kid": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK#z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
+      },
+      "jwt_vc_payload_example": {
+        "iss": "did:key:z6MkIssuerDID",
+        "sub": "did:key:z6MkConsumerSentinelDID",
+        "nbf": 1741910400,
+        "exp": 1743206400,
+        "jti": "urn:uuid:a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "vc": {
+          "type": ["VerifiableCredential", "AccessGrantCredential"],
+          "credentialSubject": {
+            "id": "did:key:z6MkConsumerSentinelDID",
+            "env": "prod",
+            "aud": "did:key:z6MkProducerServiceDID",
+            "scope": ["service:citizen-data:read", "service:citizen-data:query"]
+          },
+          "credentialStatus": {
+            "id": "https://discovery.example.gov/status/list-001#42",
+            "type": "BitstringStatusListEntry",
+            "statusListIndex": "42",
+            "statusListCredential": "https://discovery.example.gov/status/list-001",
+            "statusPurpose": "revocation"
+          }
+        }
+      },
+      "did_key_example": {
+        "description": "Example did:key DID Document",
+        "id": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+        "verificationMethod": [
+          {
+            "id": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK#z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+            "type": "Ed25519VerificationKey2020",
+            "controller": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+            "publicKeyMultibase": "z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
+          }
+        ],
+        "authentication": ["did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK#z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"],
+        "assertionMethod": ["did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK#z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"]
+      }
+    },
+    "error_handling": {
+      "vc_verification_errors": [
+        {"code": "VC_EXPIRED", "http_status": 401, "description": "VC exp claim is in the past"},
+        {"code": "VC_NOT_YET_VALID", "http_status": 401, "description": "VC nbf claim is in the future beyond clock skew"},
+        {"code": "ISSUER_UNTRUSTED", "http_status": 403, "description": "Issuer DID is not active in IssuerRegistry"},
+        {"code": "INVALID_SIGNATURE", "http_status": 401, "description": "JWT signature verification failed"},
+        {"code": "STATUS_REVOKED", "http_status": 403, "description": "Credential is marked revoked in status list"},
+        {"code": "ENV_MISMATCH", "http_status": 403, "description": "VC env claim does not match current environment"},
+        {"code": "AUD_MISMATCH", "http_status": 403, "description": "VC aud claim does not match producer DID"},
+        {"code": "SCHEMA_INVALID", "http_status": 400, "description": "VC does not conform to expected schema"},
+        {"code": "DID_UNRESOLVABLE", "http_status": 502, "description": "Issuer DID cannot be resolved"},
+        {"code": "ALG_PROHIBITED", "http_status": 400, "description": "JWT uses a prohibited algorithm"}
+      ]
+    },
+    "security_constraints": [
+      "The algorithm alg:none MUST be explicitly rejected at the library level, not just by convention",
+      "RS256 and HS256 MUST be rejected — only EdDSA (primary) and ES256 (secondary) are allowed",
+      "All JWT parsing must use a strict parser that rejects unknown critical header parameters",
+      "DID resolution must time out after 2000ms (configurable) — never block on resolution",
+      "Status list download must be authenticated and its signature verified before trusting content"
+    ]
+  },
+  "technical_requirements": [
+    "W3C DID Core v1.0 (https://www.w3.org/TR/did-core/)",
+    "W3C Verifiable Credentials Data Model v2.0 (https://www.w3.org/TR/vc-data-model-2.0/)",
+    "W3C Securing Verifiable Credentials using JOSE and COSE (https://www.w3.org/TR/vc-jose-cose/)",
+    "W3C Bitstring Status List v1.0 (https://www.w3.org/TR/vc-bitstring-status-list/)",
+    "RFC 9449 DPoP (for anti-replay pattern reference)",
+    "RFC 9421 HTTP Message Signatures (optional future enhancement)",
+    "Python cryptography library >= 41.0 for AES-GCM and key derivation",
+    "PyJWT or joserfc for JWT handling in Python"
+  ],
+  "dependencies": [
+    "TASK-001",
+    "TASK-002"
+  ],
+  "acceptance_criteria": [
+    "A Standards Profile document exists with all algorithms, media types, and validation rules",
+    "An Algorithm Matrix table exists listing every algorithm with REQUIRED/OPTIONAL/PROHIBITED status",
+    "A step-by-step VC/VP validation procedure exists (numbered steps, deterministic)",
+    "The Python crypto module in libs/common/crypto implements the algorithm suite",
+    "Unit tests exist verifying that prohibited algorithms (alg:none, RS256, HS256) are rejected",
+    "An example JWT-VC payload document is provided for each VC type"
+  ]
+}

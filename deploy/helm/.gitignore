@@ -1,0 +1,8 @@
+# Helm chart artifacts — managed by Helm, do not commit
+charts/*/charts/
+*.tgz
+
+# Keep manifests and values
+!Chart.yaml
+!values*.yaml
+!templates/

@@ -1,0 +1,65 @@
+version: "3.9"
+
+# Optional observability stack — run alongside the main docker-compose.yaml:
+#   docker compose -f docker-compose.yaml -f docker-compose.observability.yaml up
+#
+# Services:
+#   - loki:    Grafana Loki log aggregation backend
+#   - grafana: Grafana dashboard (UI at http://localhost:3000)
+#   - alloy:   Grafana Alloy log collector (replaces EOL Promtail)
+
+networks:
+  sentinel-net:
+    external: true
+
+services:
+  loki:
+    image: grafana/loki:2.9.4
+    container_name: loki
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+    networks:
+      - sentinel-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:3100/ready || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Admin"
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_FEATURE_TOGGLES_ENABLE: "traceqlEditor"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      loki:
+        condition: service_healthy
+    networks:
+      - sentinel-net
+
+  alloy:
+    image: grafana/alloy:v1.2.0
+    container_name: alloy
+    volumes:
+      - ./deploy/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: run /etc/alloy/config.alloy
+    depends_on:
+      loki:
+        condition: service_healthy
+    networks:
+      - sentinel-net
+    # Alloy does not need public ports unless you want the Alloy UI
+    # ports:
+    #   - "12345:12345"
+
+volumes:
+  grafana-data:

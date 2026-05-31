@@ -1,0 +1,113 @@
+{
+  "id": "TASK-032",
+  "title": "Discovery Service: Service Discovery API and Signed Service Descriptor Pattern",
+  "component": "discovery-service",
+  "status": "not-started",
+  "description": "Implement the service discovery registry that allows consumer sentinels to resolve the current endpoint(s) for a target producer service. Endpoint data remains off-chain (volatile operational state). The producer sentinel signs a ServiceDescriptor document (JWS) and publishes it to Discovery. Consumer sentinels fetch the descriptor via a resolve API and verify the producer's signature before trusting the endpoint. Optionally, hash(descriptor) is anchored on-chain for tamper evidence.",
+  "objectives": [
+    "Consumer sentinels can always resolve a current, producer-signed endpoint for any registered service",
+    "Descriptor signature verification ensures endpoint data was produced by the legitimate producer — not an attacker who compromised Discovery",
+    "TTL on descriptors prevents stale endpoint usage without requiring explicit invalidation"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      "Step 1 - ServiceDescriptor Schema: Define as a Pydantic model and JSON schema. Fields: { descriptor_id (UUID v4), service_id (str), env ('dev'|'test'|'prod'), producer_sentinel_did (str), producer_service_did (str), endpoints: [ { url (AnyHttpUrl), protocol ('http'|'https'|'grpc'|'mqtt'), weight (int 1-100), instance_id (str, optional) } ], valid_from (ISO-8601), valid_until (ISO-8601, max TTL 10 minutes), issued_at (ISO-8601) }. Max 10 endpoint entries per descriptor. url max 2048 chars.",
+      "Step 2 - Producer Publishes Descriptor: POST /api/v1/services/{service_id}/descriptor. Auth: sentinel bearer token for a producer sentinel registered for this service_id + env. Request body: { signed_descriptor_jws }. Validate: (a) JWS signature using producer_sentinel_did's public key (resolve from did:key or DID document), (b) service_id and env in descriptor match URL params, (c) producer_sentinel_did is registered in DB as an active producer sentinel for this service, (d) valid_until = issued_at + TTL ≤ 10 minutes max, (e) endpoints array not empty. On success: upsert into service_descriptors table (keyed by service_id + env). Write audit event.",
+      "Step 3 - ServiceDescriptor DB Storage: Table service_descriptors: { id (UUID PK), service_id (TEXT NOT NULL), env (TEXT NOT NULL), producer_sentinel_did (TEXT), descriptor_hash (TEXT — SHA-256 of canonical descriptor JSON), signed_descriptor_jws (TEXT NOT NULL), valid_until (TIMESTAMPTZ), published_at (TIMESTAMPTZ default now()), is_active (BOOL default true) }. UNIQUE(service_id, env). Keep last 5 versions in service_descriptor_history for audit. Index on (service_id, env, is_active).",
+      "Step 4 - Consumer Resolve API: GET /api/v1/registry/resolve?service_id=billing-api&env=prod. Auth: sentinel bearer token. Returns: { service_id, env, signed_descriptor_jws, descriptor_hash, valid_until, producer_sentinel_did }. Consumer must: (a) verify JWS signature using producer_sentinel_did, (b) check valid_until > now(), (c) optionally verify descriptor_hash matches on-chain hash in ServiceRegistry. If no active descriptor → 404 SERVICE_NOT_RESOLVABLE.",
+      "Step 5 - Descriptor Expiry Enforcement: Do NOT return descriptors where valid_until < now(). If expired: return 404 with { code: 'DESCRIPTOR_EXPIRED', message: 'No valid service descriptor. Producer sentinel may be offline.' }. Discovery does NOT auto-renew descriptors — the producer sentinel must re-publish proactively (TASK-040).",
+      "Step 6 - On-Chain Hash Anchoring (Optional): If ANCHOR_DESCRIPTORS_ON_CHAIN=true: after accepting a new descriptor, call ServiceRegistryClient.update_descriptor_hash(service_id, env, hash) in background task. Store tx_hash in service_descriptors. Consumer can verify: resolve on-chain hash from ServiceRegistry and compare against received descriptor_hash.",
+      "Step 7 - Descriptor Broadcasting: On new descriptor publish: emit an internal event (Redis pub/sub or in-process). Any active long-poll requests or SSE streams on GET /api/v1/registry/events?service_id=billing-api receive a notification. This allows consumer sentinels to react immediately to endpoint changes rather than waiting for next poll.",
+      "Step 8 - Multi-Endpoint Selection Hints: The descriptor endpoints array includes weight fields. Discovery does not perform load balancing — it returns all endpoints weighted. Consumer sentinel selects based on weight (or round-robin) and its own health state. Instance_id allows consumer to pin to a specific instance if desired.",
+      "Step 9 - Admin Inspect Descriptor: GET /api/v1/services/{service_id}/descriptor (admin only). Returns current descriptor metadata + JWS for admin inspection. Does NOT bypass signature verification requirement in consumer path.",
+      "Step 10 - Validation Strictness: Descriptor published with producer_sentinel_did that does not match DB sentinel record for service_id+env → 403 UNAUTHORIZED_PUBLISHER. Descriptor with valid_until more than 10 minutes in future → 422 TTL_TOO_LONG. Descriptor with 0 endpoints → 422 EMPTY_ENDPOINTS."
+    ],
+    "project_structure": {
+      "files": {
+        "services/discovery/src/discovery/api/v1/routers/registry.py": "GET /registry/resolve, GET /registry/events",
+        "services/discovery/src/discovery/api/v1/routers/descriptors.py": "POST /services/{id}/descriptor, GET admin inspect",
+        "services/discovery/src/discovery/services/descriptor_service.py": "Descriptor validation, storage, expiry logic",
+        "services/discovery/src/discovery/db/models/service_descriptors.py": "ORM model for service_descriptors table",
+        "services/discovery/src/discovery/schemas/descriptor.py": "ServiceDescriptor Pydantic schema"
+      }
+    },
+    "domain_entities": [
+      {
+        "name": "ServiceDescriptor",
+        "fields": [
+          { "name": "descriptor_id", "type": "UUID" },
+          { "name": "service_id", "type": "str", "max_length": 64 },
+          { "name": "env", "type": "Literal['dev','test','prod']" },
+          { "name": "producer_sentinel_did", "type": "str" },
+          { "name": "producer_service_did", "type": "str" },
+          { "name": "endpoints", "type": "list[EndpointEntry]", "max_items": 10 },
+          { "name": "valid_from", "type": "datetime" },
+          { "name": "valid_until", "type": "datetime", "constraint": "valid_until - valid_from <= 600 seconds" },
+          { "name": "issued_at", "type": "datetime" }
+        ]
+      }
+    ],
+    "example_service_descriptor": {
+      "descriptor_id": "d8f3a1b2-...",
+      "service_id": "billing-api",
+      "env": "prod",
+      "producer_sentinel_did": "did:key:z6MkProducer...",
+      "producer_service_did": "did:key:z6MkService...",
+      "endpoints": [
+        { "url": "https://billing.example.gov/api/v1", "protocol": "https", "weight": 100, "instance_id": "billing-prod-01" }
+      ],
+      "valid_from": "2024-01-15T10:00:00Z",
+      "valid_until": "2024-01-15T10:05:00Z",
+      "issued_at": "2024-01-15T10:00:00Z"
+    },
+    "api_endpoints": [
+      {
+        "method": "POST",
+        "path": "/api/v1/services/{service_id}/descriptor",
+        "auth": "producer sentinel bearer token",
+        "request": { "signed_descriptor_jws": "eyJhbGci..." },
+        "response_200": {
+          "descriptor_id": "d8f3a1b2-...",
+          "accepted_at": "2024-01-15T10:00:00Z",
+          "valid_until": "2024-01-15T10:05:00Z"
+        }
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/registry/resolve",
+        "auth": "sentinel bearer token",
+        "query_params": { "service_id": "billing-api", "env": "prod" },
+        "response_200": {
+          "service_id": "billing-api",
+          "env": "prod",
+          "signed_descriptor_jws": "eyJhbGci...",
+          "descriptor_hash": "sha256hex...",
+          "valid_until": "2024-01-15T10:05:00Z",
+          "producer_sentinel_did": "did:key:z6MkProducer..."
+        }
+      }
+    ],
+    "error_handling": [
+      { "condition": "No active descriptor for service", "status": 404, "code": "SERVICE_NOT_RESOLVABLE", "message": "No active service descriptor found for 'billing-api' in env 'prod'" },
+      { "condition": "Descriptor expired", "status": 404, "code": "DESCRIPTOR_EXPIRED", "message": "Service descriptor has expired. Producer sentinel may be offline." },
+      { "condition": "Publisher DID does not match registered producer", "status": 403, "code": "UNAUTHORIZED_PUBLISHER", "message": "producer_sentinel_did does not match the registered producer for this service" },
+      { "condition": "Descriptor signature invalid", "status": 400, "code": "INVALID_DESCRIPTOR_SIGNATURE", "message": "JWS signature verification failed for service descriptor" },
+      { "condition": "valid_until exceeds max TTL", "status": 422, "code": "TTL_TOO_LONG", "message": "Descriptor TTL cannot exceed 600 seconds" }
+    ],
+    "security_constraints": [
+      "Consumer sentinel MUST verify JWS signature using producer_sentinel_did before trusting any endpoint in the descriptor",
+      "Discovery only stores and forwards descriptors — it does not add, modify, or re-sign them",
+      "producer_sentinel_did authenticated against registered sentinel in DB — arbitrary DIDs cannot publish",
+      "valid_until hard cap: 10 minutes — prevents long-lasting stale descriptors if producer goes offline",
+      "All descriptor publish events write to audit_events"
+    ]
+  },
+  "dependencies": ["TASK-006", "TASK-017", "TASK-024"],
+  "acceptance_criteria": [
+    "Producer sentinel publishes a signed descriptor → consumer sentinel resolves it and verifies signature",
+    "Descriptor with invalid signature is rejected with 400 INVALID_DESCRIPTOR_SIGNATURE",
+    "Expired descriptor returns 404 DESCRIPTOR_EXPIRED",
+    "Descriptor published by a DID not matching the registered producer → 403 UNAUTHORIZED_PUBLISHER",
+    "On-chain hash anchoring stores tx_hash in DB after ServiceRegistry.update_descriptor_hash() call"
+  ]
+}

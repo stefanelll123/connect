@@ -1,0 +1,77 @@
+{
+  "uid": "sentinel-ops",
+  "title": "Sentinel — Operations",
+  "tags": ["sentinel", "operations"],
+  "timezone": "browser",
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Request Rate (inbound)",
+      "gridPos": {"x": 0, "y": 0, "w": 6, "h": 4},
+      "targets": [{"refId": "A", "datasource": {"uid": "prometheus"}, "expr": "sum(rate(sentinel_http_requests_total{direction=\"inbound\"}[5m]))"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "orientation": "auto", "textMode": "auto", "colorMode": "value", "graphMode": "area"},
+      "fieldConfig": {"defaults": {"unit": "reqps", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1000}]}}}
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Deny Rate",
+      "gridPos": {"x": 6, "y": 0, "w": 6, "h": 4},
+      "targets": [{"refId": "A", "datasource": {"uid": "prometheus"}, "expr": "sum(rate(sentinel_decisions_total{decision=\"DENY\"}[5m]))"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value"},
+      "fieldConfig": {"defaults": {"unit": "reqps"}}
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Replay Rejections / min",
+      "gridPos": {"x": 12, "y": 0, "w": 6, "h": 4},
+      "targets": [{"refId": "A", "datasource": {"uid": "prometheus"}, "expr": "sum(rate(sentinel_replay_rejects_total[1m])) * 60"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value"},
+      "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 5}, {"color": "red", "value": 20}]}}}
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Active SSE Connections",
+      "gridPos": {"x": 18, "y": 0, "w": 6, "h": 4},
+      "targets": [{"refId": "A", "datasource": {"uid": "prometheus"}, "expr": "sum(sentinel_sse_active_connections)"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value"},
+      "fieldConfig": {"defaults": {"unit": "short"}}
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Request Rate by Direction",
+      "gridPos": {"x": 0, "y": 4, "w": 12, "h": 8},
+      "targets": [
+        {"refId": "A", "datasource": {"uid": "prometheus"}, "expr": "sum(rate(sentinel_http_requests_total{direction=\"inbound\"}[5m])) by (service_id)", "legendFormat": "in: {{service_id}}"},
+        {"refId": "B", "datasource": {"uid": "prometheus"}, "expr": "sum(rate(sentinel_http_requests_total{direction=\"outbound\"}[5m])) by (service_id)", "legendFormat": "out: {{service_id}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps"}}
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Deny Rate by Reason",
+      "gridPos": {"x": 12, "y": 4, "w": 12, "h": 8},
+      "targets": [{"refId": "A", "datasource": {"uid": "prometheus"}, "expr": "sum(rate(sentinel_decisions_total{decision=\"DENY\"}[5m])) by (reason)", "legendFormat": "{{reason}}"}],
+      "fieldConfig": {"defaults": {"unit": "reqps", "custom": {"stacking": {"mode": "normal"}}}}
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Request Latency (p50/p95/p99)",
+      "gridPos": {"x": 0, "y": 12, "w": 24, "h": 8},
+      "targets": [
+        {"refId": "A", "datasource": {"uid": "prometheus"}, "expr": "histogram_quantile(0.50, sum(rate(sentinel_request_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p50"},
+        {"refId": "B", "datasource": {"uid": "prometheus"}, "expr": "histogram_quantile(0.95, sum(rate(sentinel_request_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p95"},
+        {"refId": "C", "datasource": {"uid": "prometheus"}, "expr": "histogram_quantile(0.99, sum(rate(sentinel_request_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p99"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    }
+  ]
+}

@@ -1,0 +1,51 @@
+{
+  "id": "TASK-039",
+  "title": "Sentinel: DID and Key Lifecycle Management (Generate, Load, Rotate, Backup/Restore) with Proof-of-Possession",
+  "component": "sentinel",
+  "status": "not-started",
+  "description": "Implement the module that manages the sentinel's DID and cryptographic key identity throughout its lifecycle: initial key generation and DID derivation, loading and integrity validation at runtime, DID Proof-of-Possession signing for the onboarding handshake, key rotation with Discovery re-issuance of credentials, and backup/restore for disaster recovery. Provide sentinelctl CLI subcommands for all offline operations.",
+  "objectives": [
+    "Deterministic DID derivation from Ed25519 key (did:key method)",
+    "PoP signing produces a verifiable signature over the onboarding challenge payload",
+    "Key rotation does not cause service downtime — grace window allows overlapping key acceptance"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      "Step 1 - DID Method: Use did:key with Ed25519 (multibase-encoded ed25519 public key per did:key spec). DID derivation: generate 32-byte Ed25519 private key → Ed25519PublicKey → bytes → multicodec-prefix (0xed01) + public_key_bytes → multibase-encode to base58btc → prepend 'did:key:z'. Store DID as a string. The DID is deterministically derived from the key — re-derive on load to validate consistency.",
+      "Step 2 - sentinelctl init Command: CLI command: sentinelctl init --service-id billing-api --role producer --env prod --output /var/sentinel/store/. Actions: (a) generate Ed25519 key using os.urandom(32), (b) derive DID, (c) encrypt key using SecretStorage (TASK-038), (d) write sentinel.json manifest: { sentinel_id: uuid4(), did, service_id, role, env, key_version: 1, generated_at }. Print DID to stdout for admin registration. Fail if /var/sentinel/store/ already contains a key (idempotent protection).",
+      "Step 3 - Key Loading at Runtime: In Wallet.load() called during lifespan startup: (a) load encrypted private key via SecretStorage, (b) decrypt to bytes, (c) load sentinel.json manifest, (d) re-derive DID from loaded key bytes, (e) compare derived DID against manifest.did — mismatch → startup failure (corrupted key or wrong key for DID). (f) wrap key bytes in SecretBytes (TASK-038). Log: 'DID loaded: did:key:z6Mk...(first 20 chars)...' — never log full key or full DID in structured log (use truncated form for privacy).",
+      "Step 4 - Proof-of-Possession Signing: Method sign_pop(challenge_nonce: str, token_jti: str) → str (base64url signature). PoP payload (canonical JSON, sorted keys): { jti: token_jti, did: self.did, challenge_nonce: challenge_nonce, iat: int(time.time()) }. Sign payload bytes with Ed25519 private key. Return base64url-encoded 64-byte signature. Used in onboarding handshake (TASK-026). Caller includes proof_value=sign_pop(...) in the OnboardingProofRequest.",
+      "Step 5 - PoP Verification (for internal testing): Method verify_pop(did: str, pop_payload: dict, signature_b64url: str) → bool. Resolve public key from did:key DID. Verify Ed25519 signature over canonical JSON bytes. Used in unit tests to verify own signing.",
+      "Step 6 - Key Version Management: sentinel.json includes key_version (int, starts at 1). On rotation, increment to 2, etc. Old key versions stored as keys/did_private_key_v{n}.enc until grace window expires. active_key_version tracked in manifest. Signing always uses active version. Verification accepts active and any grace-window version.",
+      "Step 7 - sentinelctl rotate-key Command: CLI: sentinelctl rotate-key --grace-period-seconds 300. Actions: (a) generate new Ed25519 key, (b) derive new DID (NOTE: for sentinel identity, the DID changes on key rotation unless using did:web — this is a breaking change), (c) encrypt and store as keys/did_private_key_v{new_version}.enc, (d) update manifest: key_version += 1, did = new_did, previous_did = old_did, rotation_started_at = now(), grace_until = now() + grace_period_seconds, (e) call DiscoveryClient.notify_key_rotation(old_did, new_did, proof) to request Discovery re-issue credentials for new DID. During grace_window: sentinel accepts requests verified with both old and new DID. After grace_until: old key removed.",
+      "Step 8 - Discovery Notification of Rotation: When rotate-key completes: call POST /api/v1/sentinels/{sentinel_id}/did-rotation on Discovery with body { new_did, rotation_proof (signed with new key over { sentinel_id, old_did, new_did, iat }) }. Discovery updates sentinel.did in DB and triggers re-issuance via CredentialIssuerService.reissue_on_rotation(). This is an online operation — requires Discovery to be reachable.",
+      "Step 9 - Backup/Restore: sentinelctl backup --output wallet_backup.enc --passphrase-env BACKUP_PASSPHRASE. Derives AES-256-GCM key using scrypt(passphrase, salt=random_16_bytes, N=2^18, r=8, p=1). Encrypts tarball of /var/sentinel/store/ directory. Header: { version: 1, salt, key_version, did, generated_at }. sentinelctl restore --input wallet_backup.enc --passphrase-env BACKUP_PASSPHRASE: decrypts to /var/sentinel/store/. Validates post-restore: load sentinel.json and verify key → DID consistency.",
+      "Step 10 - Audit Logging for Key Operations: sentinelctl commands that perform key operations write to a local audit log: $SENTINEL_HOME/.sentinel/key_operations.log. Format: JSON lines. Fields: ts, operation, key_version, did_truncated, outcome (success|failure), error. This is local-only (not sent to Discovery). On rotation: also writes an audit event to Discovery (TASK-034 flow)."
+    ],
+    "project_structure": {
+      "files": {
+        "services/sentinel/src/sentinel/wallet/key_manager.py": "Key generation, loading, DID derivation, PoP signing",
+        "services/sentinel/src/sentinel/wallet/rotation.py": "Key rotation logic and grace window management",
+        "services/sentinel/src/sentinel/cli/sentinelctl.py": "Typer-based CLI: init, rotate-key, backup, restore",
+        "services/sentinel/src/sentinel/cli/commands/init.py": "sentinelctl init command",
+        "services/sentinel/src/sentinel/cli/commands/rotate.py": "sentinelctl rotate-key command",
+        "services/sentinel/src/sentinel/cli/commands/backup.py": "sentinelctl backup/restore commands"
+      }
+    },
+    "security_constraints": [
+      "Private key bytes only in memory as SecretBytes — never printed, never serialized, never passed to subprocesses",
+      "DID derivation is deterministic — any mismatch between stored DID and re-derived DID is a critical error",
+      "Grace window after rotation: old key only accepted for verification, not for new signing operations",
+      "Backup passphrase sourced from env var (never CLI argument) to avoid shell history exposure",
+      "scrypt parameters for backup: N=2^18 (min), r=8, p=1 — tunable via CLI for slower machines"
+    ]
+  },
+  "dependencies": ["TASK-038", "TASK-005"],
+  "acceptance_criteria": [
+    "sentinelctl init generates a consistent DID from the stored key (re-run load re-derives same DID)",
+    "sign_pop produces a valid Ed25519 signature verifiable with the public key in the DID (round-trip test)",
+    "After rotate-key, new DID differs from old DID; grace window allows requests to be verified with old DID",
+    "Backup → restore → load cycle produces the same DID and functional signing key",
+    "Startup fails if manifest DID does not match key-derived DID (tests with tampered manifest)"
+  ]
+}

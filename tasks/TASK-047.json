@@ -1,0 +1,97 @@
+{
+  "id": "TASK-047",
+  "title": "Sentinel: Policy Engine (ABAC/capability model, YAML policy format, hot reload with signature verification)",
+  "component": "sentinel/libs/common/policy_engine",
+  "status": "pending",
+  "description": "Implement the sentinel's attribute-based access control (ABAC) policy engine. Policies are defined in YAML format with versioning, distributed via the config bundle (TASK-027) or a dedicated signed endpoint, and evaluated against the incoming request context (resource, action, env, consumer DID, VC claims). The engine supports first-match rule evaluation, structured explain output for audit, and hot reload that atomically applies a new signed policy without service restart. The engine is the final gate before permitting backend access.",
+  "objectives": [
+    "Define YAML policy schema: rules[] with match conditions (service_id, path_glob, method, required_scopes, required_issuer, env, decision)",
+    "Implement evaluator with first-match semantics and specificity ordering (exact > glob)",
+    "Return structured explain output: rule_id, missing_scopes, reason for audit log",
+    "Load policy from config bundle JWS (TASK-027) — validate signature before applying",
+    "Implement hot reload: atomic policy swap, retain last-valid policy for rollback",
+    "Expose evaluate() method used by producer inbound pipeline (TASK-045)"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      {
+        "step": 1,
+        "title": "Define YAML policy schema",
+        "detail": "File `policy.schema.yaml` (documentation, non-enforced). Structure: `{version: '1.0', issued_by: '<did>', issued_at: '<iso8601>', rules: [{id: '<rule_id>', service_id: '<exact or *>', path_glob: '<glob>', method: '<GET|POST|*>', env: '<prod|test|*>', required_scopes: ['<scope1>'], required_issuer: '<did or null>', required_credential_type: '<type or null>', decision: 'permit|deny', priority: <int>}]}`. `required_scopes` checked against all `credentialSubject.scopes` claims across presented VCs. If `required_issuer` is set, at least one VC must be from that issuer. `priority` determines ordering (lower = evaluated first); tie-break: more specific path_glob (fewer wildcards) wins."
+      },
+      {
+        "step": 2,
+        "title": "Implement PolicyRule dataclass and loader",
+        "detail": "Parse YAML into typed `PolicyRule` dataclasses: `{id, service_id_pattern, path_pattern, method_pattern, env_pattern, required_scopes: frozenset, required_issuer, required_credential_type, decision: PolicyDecisionType, priority}`. Use `fnmatch.fnmatch` for glob matching. Build regex from path_glob at load time (compile once, cache). Sort rules by `priority` ascending (lower = first-match priority). Validate at load: (1) rule ids are unique, (2) decision in {permit, deny}, (3) scopes are non-empty strings, (4) no circular or contradictory rules (warn only, don't block)."
+      },
+      {
+        "step": 3,
+        "title": "Implement PolicyEvaluator.evaluate()",
+        "detail": "Method `evaluate(resource: str, method: str, env: str, consumer_did: str, vcs: list[VerifiedCredential]) -> PolicyDecision`. Steps: (1) Build `context`: extract all `scopes` from all VC claims (union set), extract issuer DIDs, extract credential types. (2) Iterate sorted rules. (3) For each rule: check `service_id_pattern`, `path_pattern` (fnmatch), `method_pattern`, `env_pattern` against request context — skip if no match. (4) If rule matches structure: check `required_scopes ⊆ context.scopes`. Check `required_issuer` if set. Check `required_credential_type` if set. (5) If all requirements met: return `PolicyDecision(permit=(decision==permit), rule_id=rule.id, missing_scopes=[], reason='rule_matched')`. (6) If scopes missing: continue to next rule (partial match — don't deny immediately). (7) If no rule matches: default deny with `reason='no_matching_rule'`."
+      },
+      {
+        "step": 4,
+        "title": "Return structured explain output",
+        "detail": "PolicyDecision dataclass: `{permit: bool, rule_id: str | None, missing_scopes: list[str], extra_context: dict, reason: str}`. `missing_scopes` is computed only for the best-matching rule (the one that matched structure but failed scope check). `extra_context` may include `required_issuer_expected` and `actual_issuers` (for audit only — never included in HTTP response). The pipeline logs `rule_id`, `missing_scopes`, and `reason` internally but returns only `{error: 'POLICY_DENY', request_id}` to the caller."
+      },
+      {
+        "step": 5,
+        "title": "Policy distribution and signature verification",
+        "detail": "Policy is distributed as part of the signed config bundle (TASK-027) under key `policy`. When PolicyEngine receives a new policy YAML string: (1) Verify it was extracted from a JWS-verified config bundle — policy MUST NOT be loaded from unsigned source. (2) Parse YAML into PolicyRules. (3) Validate schema. (4) Compute SHA-256 fingerprint of policy YAML. (5) Log policy load: `event=policy_loaded version={ver} rule_count={n} fingerprint={sha256}`. The config bundle's signature (verified in TASK-027/TASK-040) is the trust anchor for policy — no separate policy-specific signature needed."
+      },
+      {
+        "step": 6,
+        "title": "Implement hot reload (atomic swap + rollback)",
+        "detail": "Class `PolicyEngine` maintains: `_active_policy: PolicyRules`, `_last_valid_policy: PolicyRules`. Method `reload(new_policy_yaml: str, bundle_version: str) -> bool`. Steps: (1) Parse + validate new policy. (2) Acquire `asyncio.Lock` (write lock on policy swap — brief, non-blocking). (3) Set `_last_valid_policy = _active_policy`. (4) Set `_active_policy = new_policy`. (5) Release lock. (6) Return True. Evaluation always reads `_active_policy` under the same lock (read side). Method `rollback() -> None`: swaps back `_active_policy = _last_valid_policy`. Rollback can be triggered by operator CLI or monitoring alert."
+      },
+      {
+        "step": 7,
+        "title": "Default deny-all policy",
+        "detail": "If no policy is loaded (startup before first bundle sync): use a built-in `DENY_ALL` policy: single rule `{id: 'default_deny', service_id: '*', path_glob: '**', method: '*', env: '*', required_scopes: [], decision: 'deny', priority: 9999}`. This ensures the sentinel is fail-closed before policy is received. Log WARNING at startup if no policy loaded: `event=no_policy_loaded using=deny_all`. This prevents unintended permit of requests before initial config sync completes."
+      },
+      {
+        "step": 8,
+        "title": "Tests",
+        "detail": "Test file: `tests/unit/policy_engine/test_evaluator.py`. Cases: (1) exact path match + all scopes present → permit; (2) glob path match + scopes present → permit; (3) exact path match + missing scope → deny with missing_scopes populated; (4) method mismatch skips rule → falls through to deny; (5) env mismatch skips rule; (6) required_issuer match → permit; (7) required_issuer mismatch → deny; (8) no matching rule → default deny; (9) deny-all rule → deny; (10) hot reload replaces active policy atomically; (11) rollback restores previous policy; (12) empty policy YAML load rejected. Test glob priority ordering with overlapping rules."
+      }
+    ]
+  },
+  "project_structure": {
+    "files": {
+      "libs/common/policy_engine/__init__.py": "Exports PolicyEngine, PolicyDecision, PolicyRule",
+      "libs/common/policy_engine/models.py": "PolicyRule, PolicyDecision, PolicyDecisionType dataclasses",
+      "libs/common/policy_engine/evaluator.py": "PolicyEvaluator.evaluate() with first-match + explain",
+      "libs/common/policy_engine/loader.py": "YAML parsing, schema validation, fingerprint computation",
+      "libs/common/policy_engine/engine.py": "PolicyEngine with hot-reload and rollback",
+      "libs/common/policy_engine/policy.schema.yaml": "YAML schema documentation",
+      "tests/unit/policy_engine/test_evaluator.py": "12 test cases",
+      "tests/unit/policy_engine/fixtures/sample_policy.yaml": "Sample valid policy for tests"
+    }
+  },
+  "data_structures": {
+    "policy_yaml_example": "version: '1'\nissued_by: 'did:key:z6Mk...'\nissued_at: '2024-01-01T00:00:00Z'\nrules:\n  - id: allow_read_service_a\n    service_id: service-a\n    path_glob: '/api/v1/data/**'\n    method: GET\n    env: prod\n    required_scopes:\n      - data:read\n    decision: permit\n    priority: 10\n  - id: default_deny\n    service_id: '*'\n    path_glob: '**'\n    method: '*'\n    env: '*'\n    required_scopes: []\n    decision: deny\n    priority: 9999",
+    "policy_decision": {
+      "permit": true,
+      "rule_id": "allow_read_service_a",
+      "missing_scopes": [],
+      "reason": "rule_matched"
+    }
+  },
+  "security_constraints": [
+    "Policy MUST only be loaded from a cryptographically verified config bundle — no unsigned policy loading",
+    "Default behavior with no policy loaded is DENY ALL — sentinel is fail-closed before first bundle sync",
+    "Policy hot reload is atomic — no window where partial policy is evaluated",
+    "Policy YAML must be parsed with safe_load (not yaml.load) to prevent YAML deserialization attacks",
+    "required_scopes check must use set containment (all required scopes present) — not OR logic",
+    "Deny response never includes rule_id or missing_scopes — those are internal audit only"
+  ],
+  "dependencies": ["TASK-004", "TASK-027", "TASK-037"],
+  "acceptance_criteria": [
+    "Permit decision correctly enforces all required_scopes as AND conditions",
+    "Default deny fires when no rules match",
+    "Deny-all policy active at startup before first bundle load",
+    "Hot reload atomically replaces active policy without race condition",
+    "Rollback restores previous known-good policy",
+    "Policy loaded from unsigned source is rejected with load error"
+  ]
+}

@@ -1,0 +1,583 @@
+{
+  "project": {
+    "name": "Decentralized Identity Architecture for Interoperable E-Government Sentinels",
+    "type": "architecture-and-research-proposal",
+    "status": "concept-defined",
+    "primary_goal": "Evolve an existing Sentinel-based e-government interoperability model by preserving centralized service discovery while decentralizing service-to-service authentication and authorization."
+  },
+  "problem_statement": {
+    "current_state": {
+      "summary": "The current interoperability model uses Sentinel components as producers and consumers, with a central discovery/routing point. Authentication and authorization are effectively centralized.",
+      "core_components": [
+        "Producer Sentinel",
+        "Consumer Sentinel",
+        "Central Discovery / Central Point",
+        "Producer-side service",
+        "Consumer-side service"
+      ],
+      "observed_limitations": [
+        "Centralized trust dependency",
+        "Limited autonomy for independently operated government entities",
+        "Difficult decentralized revocation/governance",
+        "Weak architectural separation between discovery and trust"
+      ]
+    },
+    "target_state": {
+      "summary": "Keep service discovery centralized, but move authentication and authorization to a decentralized trust model based on DID/VC/VP and possibly smart contracts.",
+      "desired_properties": [
+        "Mutual authentication between Sentinels from different government entities",
+        "Fine-grained access control per environment",
+        "Revocation and lifecycle management without a single central authority",
+        "Minimal disruption to existing communication flow",
+        "Compatibility with HTTP as baseline, with extensibility to DIDComm and MQTT"
+      ]
+    }
+  },
+  "actors": {
+    "government_entities": {
+      "description": "Independent government organizations, each operating and maintaining its own Sentinel instance(s).",
+      "assumptions": [
+        "Each government entity installs its own Sentinel",
+        "Each government entity is responsible for updating and operating its own Sentinel",
+        "Administrative isolation between entities is assumed"
+      ]
+    },
+    "sentinels": {
+      "description": "Gateway/agent components that mediate inter-entity requests and implement decentralized identity, credential handling, policy evaluation, and revocation checks."
+    },
+    "central_discovery_router": {
+      "description": "Centralized service catalog and message router/forwarder.",
+      "important_note": "It is not an authorization authority in the proposed architecture."
+    },
+    "distributed_trust_layer": {
+      "description": "Ledger-based trust/governance layer storing stable identity/trust metadata, not volatile operational endpoint data."
+    }
+  },
+  "scope": {
+    "in_scope": [
+      "System architecture",
+      "Interaction flows",
+      "Trust model",
+      "Credential issuance and verification model",
+      "Revocation model",
+      "Environment binding model",
+      "Sentinel testbed design",
+      "Compromise and outage evaluation model",
+      "Protocol strategy for HTTP, DIDComm, and MQTT"
+    ],
+    "out_of_scope": [
+      "Low-level implementation details",
+      "Mandating a single technology stack",
+      "User identity management",
+      "Detailed UI or service business logic",
+      "Production-grade deployment manifests"
+    ],
+    "identity_scope": {
+      "subject_type": "services and service gateways, not end-users",
+      "explicit_note": "This project focuses on decentralized identity for machine-to-machine / service-to-service communication."
+    }
+  },
+  "technology_preferences_and_constraints": {
+    "ledger_preference": {
+      "preferred": "Ethereum",
+      "note": "Ethereum is preferred by the project sponsor, but alternatives are acceptable if architecturally better."
+    },
+    "pki": {
+      "required_to_keep": false,
+      "decision": "Existing government PKI is not mandatory, but must be researched and accommodated as a compatibility/adaptation path."
+    },
+    "transports": {
+      "baseline": "HTTP",
+      "alternatives_to_support": [
+        "DIDComm",
+        "MQTT"
+      ],
+      "decision": "Retain HTTP-based messages as the primary operational baseline while designing a transport-agnostic trust layer."
+    }
+  },
+  "high_level_architecture": {
+    "summary": "A hybrid architecture with centralized discovery and decentralized trust.",
+    "layers": [
+      {
+        "name": "Operational Layer",
+        "components": [
+          "Consumer Service",
+          "Consumer Sentinel",
+          "Central Discovery / Router",
+          "Producer Sentinel",
+          "Producer Service"
+        ],
+        "responsibility": "Service invocation, routing, local proxying, operational endpoint management"
+      },
+      {
+        "name": "Trust & Governance Layer",
+        "components": [
+          "DID Registry",
+          "Trust Registry",
+          "Revocation / Status Registry"
+        ],
+        "responsibility": "Identity anchoring, issuer trust, credential status, governance metadata"
+      }
+    ],
+    "design_principle": "Keep dynamic operational data off-chain and stable trust metadata on-chain."
+  },
+  "key_architectural_decisions": [
+    {
+      "id": "D1",
+      "decision": "Keep service discovery centralized.",
+      "reason": "Preserves existing communication flow and operational simplicity."
+    },
+    {
+      "id": "D2",
+      "decision": "Decentralize authentication and authorization using DID, VC, VP, and optionally smart-contract-backed trust metadata.",
+      "reason": "Removes dependence on a single central trust authority."
+    },
+    {
+      "id": "D3",
+      "decision": "Model Sentinels as DID-enabled agents/gateways.",
+      "reason": "Minimizes required changes to existing internal services and makes the retrofit pattern practical."
+    },
+    {
+      "id": "D4",
+      "decision": "Use environment-aware authorization as a first-class requirement.",
+      "reason": "Strong dev/test/prod separation is a core project requirement and a likely novelty area."
+    },
+    {
+      "id": "D5",
+      "decision": "Do not store live service availability endpoints directly in smart contracts.",
+      "reason": "Endpoints are operationally dynamic and unsuitable as primary on-chain data."
+    },
+    {
+      "id": "D6",
+      "decision": "Store trust metadata on-chain and operational endpoint metadata in central discovery.",
+      "reason": "Clean separation between stable trust anchors and dynamic service-discovery state."
+    },
+    {
+      "id": "D7",
+      "decision": "Producer Sentinels may sign service descriptors distributed by central discovery.",
+      "reason": "Enables cryptographic integrity for service metadata without putting volatile endpoint state on-chain."
+    },
+    {
+      "id": "D8",
+      "decision": "Use bounded revocation freshness guarantees instead of assuming perfectly fresh global state.",
+      "reason": "This is realistic for outages and provides a strong, formalizable security property."
+    }
+  ],
+  "identity_model": {
+    "identity_subjects": [
+      {
+        "subject": "Sentinel",
+        "holds_did": true,
+        "why": "The Sentinel is the externally visible gateway and trust enforcement point for a government entity."
+      }
+    ],
+    "optional_extension": {
+      "per_service_dids": false,
+      "note": "Per-service DIDs were considered possible, but the working model uses Sentinel-level DIDs for simplicity and retrofit friendliness."
+    },
+    "environment_model": {
+      "preferred_approach": "Separate DIDs per environment, optionally combined with audience/channel binding in the VP.",
+      "alternatives_considered": [
+        "Single DID with env claim only",
+        "Environment-derived keys under one DID"
+      ],
+      "current_preference_reason": "Separate DIDs per environment provide clearer non-confusion guarantees and simpler reasoning."
+    }
+  },
+  "credential_model": {
+    "artifacts": {
+      "did": "Identifier for a Sentinel or other service principal",
+      "vc": "Credential expressing access rights or trust assertions",
+      "vp": "Runtime presentation proving possession of valid credentials and DID key control"
+    },
+    "credential_subject": "Usually the Consumer Sentinel DID",
+    "likely_issuer": "Typically the Producer-side authority / service owner / government entity exposing the service",
+    "credential_purpose": [
+      "Authorize one Sentinel to call services exposed by another",
+      "Convey fine-grained rights",
+      "Bind rights to a specific environment and optionally to a specific audience/provider"
+    ],
+    "example_claims": [
+      "sub = DID(consumer sentinel)",
+      "aud = DID(producer sentinel)",
+      "env = dev/test/prod",
+      "scope = allowed service(s), endpoint(s), method(s), attributes",
+      "exp = expiry time",
+      "nbf = not before",
+      "statusRef = reference to credential status mechanism"
+    ]
+  },
+  "authorization_model": {
+    "objective": "Define a formal authorization model suitable for academic contribution.",
+    "decision_function": "Decide(B, A, r, e, ctx) -> Permit | Deny",
+    "definitions": {
+      "A": "Calling / consumer-side Sentinel",
+      "B": "Receiving / producer-side Sentinel",
+      "r": "Resource or API operation",
+      "e": "Environment",
+      "ctx": "Runtime context including time, nonce, transport/channel binding, revocation state, etc."
+    },
+    "required_conditions_for_permit": [
+      "A proves control of its DID key",
+      "A presents VC(s) satisfying policy for resource r and environment e",
+      "The issuer is trusted",
+      "Credential status is acceptable under freshness policy",
+      "The VP is audience-bound and environment-bound",
+      "Any channel-binding / anti-replay requirements are satisfied"
+    ],
+    "policy_style": {
+      "current_direction": "Capability-like and/or ABAC-style model",
+      "note": "This remains flexible; the architecture supports either as long as the decision logic is formalized."
+    }
+  },
+  "environment_binding": {
+    "importance": "Critical research and security feature",
+    "threat_addressed": "Cross-environment replay or confused-deputy failures between dev/test/prod",
+    "chosen_direction": {
+      "primary": "Separate DIDs per environment",
+      "secondary": "Bind VP proof to audience, environment, nonce, and channel binding data"
+    },
+    "vp_binding_material": [
+      "aud = DID(B)",
+      "env = e",
+      "nonce",
+      "channelBinding"
+    ],
+    "security_goal": "A credential or presentation intended for one environment should not be reusable in another environment."
+  },
+  "revocation_model": {
+    "importance": "Core functionality and likely research contribution area",
+    "approach": "Bounded freshness revocation model",
+    "freshness_parameter": "Delta (Δ)",
+    "intended_guarantee": "If a credential is revoked at time t_r, then any request accepted after t_r + Δ must not be authorized by that credential.",
+    "practical_mechanisms": [
+      "Status lists",
+      "Accumulator-based status",
+      "Contract-backed status mappings",
+      "Local cache with bounded staleness",
+      "Optional emergency revocation channel"
+    ],
+    "sentinel_behavior": {
+      "normal_mode": "Use cached revocation view if it is fresh enough",
+      "stale_mode_options": [
+        "Fail closed",
+        "Fail open with degraded privileges",
+        "Fallback to alternate status source"
+      ],
+      "note": "Evaluation should compare these strategies under outage scenarios."
+    }
+  },
+  "smart_contract_role": {
+    "accepted_uses": [
+      "DID registry",
+      "Trust registry",
+      "Issuer authorization metadata",
+      "Credential status / revocation references",
+      "Optional hash anchoring of signed service descriptors",
+      "Service ownership / authoritative producer binding"
+    ],
+    "rejected_primary_use": [
+      "Storing live service availability endpoints",
+      "Storing volatile health/availability URLs",
+      "Acting as the primary dynamic service discovery store"
+    ],
+    "reason_for_rejection": "On-chain state is too rigid, costly, and leaky for volatile operational endpoint data."
+  },
+  "service_discovery_model": {
+    "central_discovery_role": [
+      "Service catalog",
+      "Endpoint/routing lookup",
+      "Forwarding/routing requests",
+      "Operational metadata store"
+    ],
+    "central_discovery_non_role": [
+      "Not the primary authorization authority",
+      "Not the root of trust",
+      "Not the place where credential trust is decided"
+    ],
+    "operational_data_kept_here": [
+      "Current endpoint URL",
+      "Routing metadata",
+      "Protocol bindings",
+      "Load balancing / failover info",
+      "Health/availability state",
+      "Current signed service descriptor"
+    ],
+    "verification_expectation": "Discovery-provided service metadata may be signed by the Producer Sentinel and validated against on-chain trust state."
+  },
+  "service_descriptor_pattern": {
+    "status": "Accepted design direction",
+    "description": "Producer Sentinel signs a service descriptor containing current operational endpoint metadata, and central discovery stores/distributes it.",
+    "descriptor_example_fields": [
+      "serviceId",
+      "producerDid",
+      "environment",
+      "endpoint",
+      "protocol",
+      "version",
+      "timestamp"
+    ],
+    "verification_steps": [
+      "Verify the descriptor signature against the Producer Sentinel DID",
+      "Verify that the Producer Sentinel DID is authorized for that service/environment according to on-chain trust metadata",
+      "Use descriptor as current operational resolution material"
+    ],
+    "optional_enhancement": "Anchor hash(serviceDescriptor) on-chain for tamper evidence and auditing."
+  },
+  "communication_model": {
+    "baseline_transport": "HTTP",
+    "alt_transports": [
+      "DIDComm",
+      "MQTT"
+    ],
+    "architectural_rule": "Authorization semantics should remain transport-agnostic; only the transport bindings differ.",
+    "anti_replay_and_binding": {
+      "http": "Bind VP to TLS exporter and/or request-specific nonce + audience + env",
+      "didcomm": "Bind VP to DIDComm session/context",
+      "mqtt": "Bind VP to MQTT session/channel/topic context"
+    }
+  },
+  "end_to_end_flows": {
+    "flow_1_service_registration": {
+      "purpose": "Register service and route metadata",
+      "steps": [
+        "Producer Sentinel prepares service metadata",
+        "Producer Sentinel may sign a service descriptor",
+        "Producer Sentinel registers service metadata in Central Discovery",
+        "Optional: trust anchor or descriptor hash is anchored on-chain"
+      ]
+    },
+    "flow_2_credential_issuance": {
+      "purpose": "Grant service-to-service access rights",
+      "steps": [
+        "Producer-side authority decides to grant access to Consumer Sentinel",
+        "Issuer creates VC for Consumer Sentinel DID",
+        "VC includes audience/environment/scope/expiry/status reference",
+        "Consumer Sentinel stores VC in its credential wallet"
+      ]
+    },
+    "flow_3_request_execution": {
+      "purpose": "Runtime call from consumer-side service to producer-side service",
+      "steps": [
+        "Consumer Service calls its local Consumer Sentinel",
+        "Consumer Sentinel resolves route via Central Discovery if needed",
+        "Consumer Sentinel creates a VP using relevant VC(s)",
+        "VP proof is bound to aud=DID(Producer Sentinel), env, nonce, and transport-specific binding",
+        "Consumer Sentinel sends request via HTTP/DIDComm/MQTT, typically through Central Discovery",
+        "Central Discovery forwards/reroutes but does not make final auth decisions",
+        "Producer Sentinel receives request",
+        "Producer Sentinel verifies DID ownership proof, VC signature, issuer trust, environment match, and revocation freshness",
+        "Producer Sentinel evaluates Decide(B,A,r,e,ctx)",
+        "If Permit, request is forwarded internally to Producer Service",
+        "If Deny, request is rejected"
+      ]
+    },
+    "flow_4_revocation": {
+      "purpose": "Invalidate access after compromise or policy change",
+      "steps": [
+        "Authorized revoker updates credential status in revocation/status mechanism",
+        "Producer Sentinels refresh status according to strategy",
+        "After freshness bound Δ, revoked credentials must no longer authorize requests"
+      ]
+    },
+    "flow_5_key_rotation_or_did_update": {
+      "purpose": "Recover from key compromise or perform maintenance",
+      "steps": [
+        "Sentinel controller updates DID registry with new key material or deactivates old DID",
+        "Other Sentinels resolve updated DID state",
+        "Subsequent VP verification uses new trust material"
+      ]
+    }
+  },
+  "sentinel_internal_components": {
+    "description": "Each Sentinel is conceived as a DID-enabled gateway/agent with the following internal modules.",
+    "modules": [
+      {
+        "name": "DID Key Store",
+        "responsibility": "Holds Sentinel DID keys, ideally environment-specific"
+      },
+      {
+        "name": "Credential Wallet",
+        "responsibility": "Stores VC(s) and related metadata"
+      },
+      {
+        "name": "VP Builder / Verifier",
+        "responsibility": "Constructs presentations and verifies received proofs/credentials"
+      },
+      {
+        "name": "Policy Engine",
+        "responsibility": "Evaluates Decide(B,A,r,e,ctx)"
+      },
+      {
+        "name": "Revocation Manager",
+        "responsibility": "Tracks status freshness, cache, Delta-based revocation behavior"
+      },
+      {
+        "name": "Transport Adapter",
+        "responsibility": "Integrates the common trust model with HTTP, DIDComm, MQTT"
+      },
+      {
+        "name": "Service Descriptor Signer",
+        "responsibility": "Signs service metadata distributed through discovery"
+      }
+    ]
+  },
+  "ledger_components": {
+    "did_registry": {
+      "purpose": "Map DIDs to public keys, service metadata references, rotation/deactivation state"
+    },
+    "trust_registry": {
+      "purpose": "Represent trusted issuers and/or authorized credential types/schemas"
+    },
+    "revocation_status_registry": {
+      "purpose": "Provide verifiable credential status information"
+    }
+  },
+  "rejected_designs": [
+    {
+      "name": "Store live endpoint directly in smart contract",
+      "decision": "Rejected",
+      "reason": "Endpoint data is dynamic operational state, not stable trust metadata."
+    },
+    {
+      "name": "Use smart contract as primary health/availability registry",
+      "decision": "Rejected",
+      "reason": "Health is highly dynamic and unsuitable for on-chain state."
+    },
+    {
+      "name": "Make central discovery the runtime authorization authority",
+      "decision": "Rejected",
+      "reason": "The architecture aims to separate routing/discovery from decentralized trust enforcement."
+    }
+  ],
+  "research_direction": {
+    "main_research_plan": "Define a formal authorization model + environment binding + revocation freshness guarantees, then implement it in a Sentinel testbed and evaluate compromise scenarios + outage scenarios.",
+    "why_this_path": "This is the most promising route to achieve moderate-to-high academic novelty.",
+    "novelty_target": [
+      "Formal authorization semantics for VC-based service access",
+      "Cryptographic environment separation",
+      "Bounded revocation freshness guarantees",
+      "Hybrid centralized discovery + decentralized trust security model",
+      "Transport-agnostic authorization semantics"
+    ]
+  },
+  "evaluation_plan": {
+    "testbed": {
+      "goal": "Implement a realistic Sentinel-based prototype across multiple entities/environments/transports."
+    },
+    "compromise_scenarios": [
+      {
+        "name": "Credential theft without private key theft",
+        "expected_outcome": "Attack should fail because attacker cannot create valid holder proof."
+      },
+      {
+        "name": "Consumer Sentinel DID key compromise",
+        "expected_outcome": "Attack initially succeeds; containment depends on revocation/key rotation and freshness bound Δ."
+      },
+      {
+        "name": "Issuer compromise",
+        "expected_outcome": "System must rely on trust registry governance and issuer deauthorization."
+      },
+      {
+        "name": "Central discovery compromise",
+        "expected_outcome": "Routing may be disrupted, but unauthorized access should still fail if audience/env/channel binding is correct."
+      }
+    ],
+    "outage_scenarios": [
+      {
+        "name": "Ledger unreachable",
+        "questions": [
+          "Can cached DID and status data be used safely?",
+          "What policy applies after freshness window expires?"
+        ]
+      },
+      {
+        "name": "Revocation feed/status update outage",
+        "questions": [
+          "How do availability and security trade off under stale status?"
+        ]
+      },
+      {
+        "name": "Clock skew/time sync problems",
+        "questions": [
+          "How much skew can the system tolerate before freshness and expiry logic becomes unreliable?"
+        ]
+      }
+    ],
+    "key_metrics": [
+      "Authorization latency (p50/p95)",
+      "Revocation containment time",
+      "Attack success probability under each threat scenario",
+      "Availability under outage conditions",
+      "Operational overhead (cache size, update rate, trust anchor complexity)"
+    ]
+  },
+  "academic_positioning": {
+    "not_claimed_as_novel": [
+      "Using DID/VC in general",
+      "Using blockchain as a trust anchor in general",
+      "Using Sentinels/gateways in general"
+    ],
+    "claimed_as_potentially_novel": [
+      "A formalized Sentinel-based decentralized authorization model for inter-government machine-to-machine interoperability",
+      "Environment-scoped service credentials with strong non-confusion guarantees",
+      "Bounded revocation freshness guarantees in a Sentinel architecture",
+      "A rigorous hybrid model where discovery remains centralized while trust is decentralized"
+    ],
+    "paper_type": "Reference architecture + formal model + prototype evaluation"
+  },
+  "diagram_context": {
+    "existing_artifacts_created": [
+      "ASCII architecture diagram",
+      "draw.io importable XML for architecture"
+    ],
+    "intended_main_static_diagram_elements": [
+      "Government Entity A trust boundary",
+      "Consumer Service",
+      "Consumer Sentinel (DID Agent)",
+      "Central Discovery / Router",
+      "Producer Sentinel (DID Agent)",
+      "Producer Service",
+      "Distributed Trust & Governance Layer",
+      "DID Registry",
+      "Trust Registry",
+      "Revocation / Status Registry",
+      "VC issuance and runtime verification notes"
+    ]
+  },
+  "core_security_properties_desired": [
+    "Mutual Sentinel authentication",
+    "Decentralized authorization",
+    "Environment-specific access control",
+    "Replay resistance",
+    "Audience restriction",
+    "Bounded revocation risk",
+    "Resilience to central discovery compromise",
+    "Separation of operational discovery from trust authority"
+  ],
+  "implementation_guidance_for_future_agent": {
+    "important_do_not_change_without_explicit_reason": [
+      "Do not move live endpoints onto the smart contract as primary source of truth",
+      "Do not turn Central Discovery into the authorization authority",
+      "Do not collapse environment separation into a weak string-only claim without cryptographic/environment-specific bindings",
+      "Do not make the transport-specific bindings define the authorization semantics; keep semantics transport-agnostic"
+    ],
+    "areas_still_open_for refinement": [
+      "Exact DID method(s)",
+      "Exact VC encoding format (JWT VC vs JSON-LD VC, etc.)",
+      "Exact revocation mechanism implementation",
+      "Whether trust registry is on-chain, off-chain, or hybrid",
+      "Whether environment separation uses only separate DIDs or also per-env derived keys",
+      "Choice of Ethereum mainnet vs permissioned Ethereum vs alternative ledger"
+    ],
+    "preferred_next_steps": [
+      "Refine the formal authorization model",
+      "Define the VP binding schema for HTTP/DIDComm/MQTT",
+      "Specify Delta-based revocation policy behavior under outages",
+      "Build a Sentinel testbed architecture document",
+      "Create sequence diagrams for runtime request and revocation flows",
+      "Write a threat model table"
+    ]
+  },
+  "one_line_summary": "Build a Sentinel-based, government-to-government interoperability architecture in which centralized discovery is preserved, but service identity, authorization, and revocation are decentralized via DID/VC/VP and a ledger-backed trust layer, with strong environment separation and bounded revocation freshness guarantees."
+}

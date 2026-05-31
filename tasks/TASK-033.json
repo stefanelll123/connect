@@ -1,0 +1,87 @@
+{
+  "id": "TASK-033",
+  "title": "Discovery Service: Sentinel Lifecycle Manager (Heartbeat, Decommission, Rejoin/Migration)",
+  "component": "discovery-service",
+  "status": "not-started",
+  "description": "Implement the complete sentinel lifecycle management: heartbeat registration to maintain liveness state, automatic status transitions (active → degraded → offline) based on heartbeat freshness, admin-initiated decommission with credential revocation and descriptor invalidation, and re-join flow for migrated or recovered sentinels. All lifecycle transitions are audit-logged.",
+  "objectives": [
+    "Discovery always has an accurate liveness picture via heartbeat TTL-based status transitions",
+    "Decommission is atomic and cascades to credential revocation and descriptor invalidation",
+    "Re-join after migration produces a new registration without leaking identity from old deployment"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      "Step 1 - Heartbeat Endpoint: POST /api/v1/sentinels/heartbeat. Auth: sentinel bearer token. Request body: { sentinel_id, instance_id, version (sentinel software version str), health: { cpu_pct: float, mem_pct: float, request_rate: float (optional) } }. Validates that sentinel_id matches token subject. Updates: sentinel_instances row for instance_id (last_seen=now(), status='active', metadata.health=health). Updates sentinels.last_seen=now(). Heartbeat interval: configured in config bundle (default 30s). Returns 200 { acknowledged_at, next_expected_at }.",
+      "Step 2 - Sentinel Status State Machine: Three statuses tracked in sentinels.computed_status (NOT persisted, computed by background task). active: last_seen < now() - HEARTBEAT_TIMEOUT (default 90s). degraded: last_seen between 90s and 300s. offline: last_seen > 300s or is_active=false. Background task (every 60s): compute status for all sentinels, write computed_status to DB, emit Prometheus metric sentinel_status_gauge (labels: env, role).",
+      "Step 3 - Instance Registry: sentinel_instances table (TASK-022). Each instance heartbeat upserts its row. Multiple instances of the same sentinel (same sentinel_id) represent multi-instance deployment. Instance status transitions: active → draining (set by admin before graceful shutdown) → offline. Discovery reports per-sentinel aggregate status (e.g., active if ANY instance is active).",
+      "Step 4 - Decommission Endpoint: POST /api/v1/sentinels/{sentinel_id}/decommission. Auth: security-admin. Body: { reason, revoke_credentials: bool (default true), invalidate_descriptor: bool (default true) }. Steps: (a) Set sentinels.is_active=false and computed_status='offline'. (b) If revoke_credentials: call CredentialIssuerService (or StatusListService) to revoke all active credentials for subject_did=sentinel.did. (c) If invalidate_descriptor: call DescriptorService.invalidate(service_id, env) — mark descriptor inactive, remove from resolve results. (d) Set all sentinel_instances for this sentinel to status='offline'. (e) Generate a terminal config bundle (all_requests_denied=true) per TASK-027. (f) Write audit event: action='sentinel_decommissioned', actor, sentinel_id, reason.",
+      "Step 5 - Decommission Confirmation Gate: For prod sentinels: decommission requires a two-step confirmation (like dual-control in TASK-030). POST /decommission creates a pending decommission record. Security-admin must POST /api/v1/sentinels/{sentinel_id}/decommission/confirm within 15 minutes. Cancellable via DELETE /decommission/pending.",
+      "Step 6 - Rejoin Endpoint: POST /api/v1/sentinels/{sentinel_id}/rejoin. Auth: mTLS + sentinel bearer token OR new enrollment token (if old token expired). Body: { did, proof (DID PoP), migration_token (optional — from TASK-049 sentinelctl migrate), new_instance_id, new_base_url }. Validates: new DID matches old sentinel record (same identity, possibly same key or rotated key with PoP). If DID key rotated: requires migration_token signed with both old and new key (TASK-039). On success: update sentinels.did (if rotated), set is_active=true, update last_seen, generate new config bundle. No new enrollment token needed for same-identity rejoin.",
+      "Step 7 - Heartbeat Staleness Alerting: If a sentinel transitions from active to degraded: emit Prometheus alert sentinel_degraded{sentinel_id, env, role}. On degraded → offline: emit sentinel_offline alert. These feed into the Grafana dashboard and PagerDuty integration (TASK-063). Write system audit event on each transition.",
+      "Step 8 - Admin Force-Offline: PATCH /api/v1/sentinels/{sentinel_id}/status { status: 'offline' }. Auth: operator. Does NOT revoke credentials — just marks the sentinel as offline for service discovery. Used during planned maintenance. Reversal: status='active' with fresh heartbeat.",
+      "Step 9 - Sentinel Listing with Status: GET /api/v1/sentinels. Auth: viewer. Query params: env, role, status (active|degraded|offline), service_id. Cursor-paginated. Response includes computed_status, last_seen, instance_count, active_instance_count.",
+      "Step 10 - Lifecycle History: sentinel_lifecycle_events table (append-only): event_type (heartbeat|status_change|decommission|rejoin), sentinel_id, old_status, new_status, instance_id, ts, actor_id. Used for audit export (TASK-034). Keep 90 days."
+    ],
+    "project_structure": {
+      "files": {
+        "services/discovery/src/discovery/api/v1/routers/sentinels.py": "Heartbeat, decommission, rejoin, list endpoints",
+        "services/discovery/src/discovery/services/lifecycle_service.py": "State machine logic, decommission cascade",
+        "services/discovery/src/discovery/tasks/heartbeat_monitor.py": "Background task: status transitions based on TTL",
+        "services/discovery/src/discovery/db/models/sentinel_lifecycle.py": "sentinel_lifecycle_events ORM model"
+      }
+    },
+    "api_endpoints": [
+      {
+        "method": "POST",
+        "path": "/api/v1/sentinels/heartbeat",
+        "auth": "sentinel bearer token",
+        "request": {
+          "sentinel_id": "a1b2c3d4-...",
+          "instance_id": "billing-prod-01",
+          "version": "1.3.2",
+          "health": { "cpu_pct": 12.5, "mem_pct": 45.0 }
+        },
+        "response_200": {
+          "acknowledged_at": "2024-01-15T10:00:00Z",
+          "next_expected_at": "2024-01-15T10:00:30Z"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/sentinels/{sentinel_id}/decommission",
+        "auth": "security-admin",
+        "request": {
+          "reason": "Host decommissioned after security incident",
+          "revoke_credentials": true,
+          "invalidate_descriptor": true
+        },
+        "response_202": {
+          "decommission_id": "uuid",
+          "status": "PENDING_CONFIRMATION",
+          "confirm_url": "/api/v1/sentinels/{id}/decommission/confirm",
+          "expires_at": "2024-01-15T10:15:00Z"
+        }
+      }
+    ],
+    "error_handling": [
+      { "condition": "Heartbeat sentinel_id does not match token", "status": 403, "code": "HEARTBEAT_SCOPE_VIOLATION", "message": "Sentinel ID in request does not match authenticated sentinel" },
+      { "condition": "Decommission of non-existent sentinel", "status": 404, "code": "SENTINEL_NOT_FOUND" },
+      { "condition": "Decommission confirmation timeout", "status": 410, "code": "DECOMMISSION_EXPIRED", "message": "Decommission confirmation window expired. Re-initiate decommission." },
+      { "condition": "Rejoin with mismatched DID and no migration token", "status": 403, "code": "DID_MISMATCH", "message": "DID does not match original sentinel identity. Provide migration_token for DID rotation." }
+    ],
+    "security_constraints": [
+      "Heartbeat endpoint validates sentinel_id matches bearer token subject — no impersonation",
+      "Decommission cascades to credential revocation — a decommissioned sentinel cannot use old credentials",
+      "Rejoin with a different DID requires migration_token signed with both old and new keys",
+      "All lifecycle transitions write to audit_events and sentinel_lifecycle_events"
+    ]
+  },
+  "dependencies": ["TASK-026", "TASK-030", "TASK-032"],
+  "acceptance_criteria": [
+    "Heartbeat updates last_seen and instance status within 1 second",
+    "Status monitor transitions sentinel to 'degraded' after 90s without heartbeat (integration test with time mock)",
+    "Decommission revokes all credentials and returns 404 on resolve for that service's descriptor",
+    "Rejoin with same DID succeeds and generates a new config bundle",
+    "GET /api/v1/sentinels?status=offline returns only offline sentinels"
+  ]
+}

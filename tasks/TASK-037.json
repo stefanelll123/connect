@@ -1,0 +1,58 @@
+{
+  "id": "TASK-037",
+  "title": "Sentinel Core Runtime: FastAPI Gateway with Producer/Consumer Modes and Async Reverse Proxy",
+  "component": "sentinel",
+  "status": "not-started",
+  "description": "Implement the core Sentinel service — a single Python binary/container image configurable as either a Producer Sentinel or a Consumer Sentinel. The Producer Sentinel acts as a reverse proxy in front of a local backend service, intercepting inbound requests and verifying security envelopes before forwarding. The Consumer Sentinel acts as a transparent proxy for outbound requests, attaching security proofs before forwarding to the resolved producer endpoint. Both modes expose health, metrics, and a minimal local UI.",
+  "objectives": [
+    "Single binary configurable via SENTINEL_ROLE=producer|consumer — no separate codebases",
+    "Producer mode: full inbound verification pipeline before forwarding to backend",
+    "Consumer mode: full outbound proof attachment pipeline before calling producer"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      "Step 1 - App Factory: Create services/sentinel/src/sentinel/app.py. create_app(role: str) → FastAPI. Role loaded from env SENTINEL_ROLE=producer|consumer. Fail at startup if SENTINEL_ROLE not set or not in ['producer','consumer']. Register routes conditionally: if producer → include inbound_router; if consumer → include outbound_router. Always include: health_router, metrics_router, ui_router (local admin UI).",
+      "Step 2 - Settings: SentinelSettings in src/sentinel/config.py. Fields: sentinel_role, sentinel_id (UUID, required), sentinel_did (str, required), env ('dev'|'test'|'prod'), service_id (str), discovery_url (AnyHttpUrl), backend_url (AnyHttpUrl, producer-only), chain_rpc_url (str), contract_addresses (dict), secret_storage_backend ('local'|'vault'), vault_addr (optional), delta_seconds (int, default 300), fail_closed_on_chain_error (bool, default true). Load from environment. All required fields verified at startup.",
+      "Step 3 - Dependency Injection: Create src/sentinel/dependencies.py. Provide: get_wallet() → Wallet (TASK-038), get_ds_client() → DiscoveryClient (TASK-040), get_chain_client() → ChainClient (TASK-042), get_policy_engine() → PolicyEngine (TASK-047), get_revocation_manager() → RevocationManager (TASK-046). All initialized in lifespan startup, cached as app state.",
+      "Step 4 - Producer Inbound Router: src/sentinel/api/inbound.py. Catch-all route: @router.api_route('/{full_path:path}', methods=['GET','POST','PUT','PATCH','DELETE','HEAD']). For each inbound request: (a) extract security envelope from request (TASK-043), (b) run verification pipeline (TASK-045), (c) on success: reverse proxy request to backend_url+full_path, (d) on failure: return 401/403 with structured error. Streaming body support via HTTPX.",
+      "Step 5 - Reverse Proxy (Producer): Use httpx.AsyncClient (created at startup, shared). Forward: method, path, query string, all headers except hop-by-hop headers (Connection, Transfer-Encoding, TE, Keep-Alive, Proxy-*). Add X-Sentinel-Verified: true and X-Sentinel-Consumer-DID: <consumer_did> headers before forwarding (for backend auditability). Strip Authorization header before forwarding. Timeout: configurable (default connect=5s, read=30s). Stream response back to caller for large responses.",
+      "Step 6 - Consumer Outbound Router: src/sentinel/api/outbound.py. POST /outbound/{service_id}. Body: proxied request (arbitrary JSON or binary). Steps: (a) resolve producer endpoint from DS client (TASK-040), (b) verify descriptor signature, (c) build security envelope with VP (TASK-043), (d) send request to producer via HTTPX with envelope headers, (e) return producer's response to local caller. Caller is the internal application service — it calls the consumer sentinel at localhost.",
+      "Step 7 - HTTPX Client Management: Producer and consumer each use a shared httpx.AsyncClient created in lifespan (limits: max_connections=100, max_keepalive_connections=20, keepalive_expiry=30s). Closed in lifespan shutdown. Retry logic: 3 retries with exponential backoff (0.5s, 1s, 2s) for connection errors. No retry on 4xx responses.",
+      "Step 8 - Internal Module Structure: Create src/sentinel/ with subdirectories: api/ (inbound.py, outbound.py, health.py), core/ (security_pipeline.py, policy.py, proof.py), wallet/ (key_manager.py, credential_store.py), clients/ (ds_client.py, chain_client.py), middleware/ (logging.py, metrics.py), ui/ (ui_router.py).",
+      "Step 9 - Health and Metrics: GET /health/live → { status: 'ok', role: 'producer', sentinel_id }. GET /health/ready → checks: wallet loaded (private key accessible), DS client reachable (HEAD /health/live on Discovery), chain client responding (optional). GET /metrics → Prometheus format (TASK-052).",
+      "Step 10 - Local Minimal UI: Mount at /ui. Serves a simple HTML page (Jinja2 templates or static React build). Pages: DID/identity info, current credentials summary (type, expires_at), health status, last 50 request logs. Bound to localhost:8080 by default (TASK-056). UI does NOT expose raw private keys or JWT values.",
+      "Step 11 - Graceful Shutdown: On SIGTERM: stop accepting new requests, drain in-flight requests (up to 30s), close HTTPX clients, flush metrics, close wallet/secret storage. Kubernetes terminationGracePeriodSeconds must be >= 35s."
+    ],
+    "project_structure": {
+      "files": {
+        "services/sentinel/src/sentinel/app.py": "App factory, lifespan, role-based router registration",
+        "services/sentinel/src/sentinel/config.py": "SentinelSettings (Pydantic BaseSettings)",
+        "services/sentinel/src/sentinel/main.py": "Uvicorn entry point",
+        "services/sentinel/src/sentinel/dependencies.py": "DI: wallet, ds_client, chain_client, policy, revocation",
+        "services/sentinel/src/sentinel/api/inbound.py": "Producer catch-all + reverse proxy",
+        "services/sentinel/src/sentinel/api/outbound.py": "Consumer outbound proxy",
+        "services/sentinel/src/sentinel/api/health.py": "Live + ready + metrics",
+        "services/sentinel/src/sentinel/core/security_pipeline.py": "Verification/signing pipeline orchestrator",
+        "services/sentinel/src/sentinel/wallet/": "Key manager + credential store",
+        "services/sentinel/src/sentinel/clients/": "DS client + chain client",
+        "services/sentinel/src/sentinel/ui/": "Local minimal UI"
+      }
+    },
+    "security_constraints": [
+      "Producer: NEVER forward a request that has not passed full verification pipeline — even during startup or degraded mode",
+      "Consumer: NEVER call producer without attaching a valid VP — stub mode disabled in prod",
+      "Backend URL (producer mode) is localhost or internal-only — never user-supplied at runtime",
+      "Authorization header from caller is stripped before forwarding to backend",
+      "X-Sentinel-Verified header added by sentinel is verified to be from trusted sentinel (not spoofable by caller — use signed header or mTLS channel binding)"
+    ]
+  },
+  "dependencies": ["TASK-009", "TASK-006", "TASK-012"],
+  "acceptance_criteria": [
+    "SENTINEL_ROLE=producer starts app with only inbound routes registered",
+    "SENTINEL_ROLE=consumer starts app with only outbound routes registered",
+    "Producer: request without valid envelope → 401 returned, backend never reached (test with mock backend)",
+    "Consumer: POST /outbound/billing-api triggers producer resolve and attaches VP header",
+    "GET /health/ready returns 503 when wallet is not loaded",
+    "Reverse proxy correctly forwards headers and streams large (>10MB) response bodies"
+  ]
+}

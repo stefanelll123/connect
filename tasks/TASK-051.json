@@ -1,0 +1,87 @@
+{
+  "id": "TASK-051",
+  "title": "Sentinel: Structured Request/Activity Logging with Redaction and Local Retention",
+  "component": "sentinel/libs/common/logging",
+  "status": "pending",
+  "description": "Implement mandatory structured JSON logging for all sentinel request decisions (permit/deny), activity events, and system lifecycle events. Logs must include security-relevant fields (decision, reason, latency, jti_hash, consumer_did_hash) while strictly redacting sensitive data (no raw headers, no full VP/VC content, no private keys). The logging system feeds the local UI log viewer (TASK-054/055), integrates with OpenTelemetry log export (TASK-052/063), and enforces configurable local retention (max N days and/or N MB).",
+  "objectives": [
+    "Define structured log event schema with all required fields",
+    "Strict redaction: never log raw Authorization, SentinelVP headers, full VC/VP JWTs, or DID values",
+    "JSON logs to stdout (container-friendly) + rotating file handler",
+    "Configurable retention: max_days and max_mb with automatic cleanup",
+    "In-memory ring buffer (10k events) feeding live UI log stream (TASK-055)",
+    "OTel log export integration via OTLP"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      {
+        "step": 1,
+        "title": "Define log event schema",
+        "detail": "Dataclass `SentinelLogEvent` in `libs/common/logging/schema.py`. Required fields: `ts: str` (ISO8601 UTC), `level: str` (INFO/WARNING/ERROR), `event: str` (snake_case event type), `direction: str | None` (inbound/outbound/internal), `role: str` (producer/consumer), `service_id: str`, `env: str`, `request_id: str`, `decision: str | None` (permit/deny/null), `error_code: str | None`, `http_method: str | None`, `http_path: str | None`, `http_status: int | None`, `latency_ms: float | None`, `jti_hash: str | None` (SHA-256 first 16 chars), `consumer_did_hash: str | None` (SHA-256 first 16 chars), `trace_id: str | None`. Optional fields: `extra: dict` (for warning/error context — must be pre-redacted)."
+      },
+      {
+        "step": 2,
+        "title": "Implement SentinelLogger",
+        "detail": "Class `SentinelLogger` in `libs/common/logging/logger.py`. Uses Python's stdlib `logging` with a custom `JSONFormatter` that serializes `SentinelLogEvent` to JSON (one line per event, UTF-8, newline-terminated). Constructor: accepts `service_id`, `env`, `role`. Methods: `log_request(event, decision, error_code, http_method, http_path, http_status, latency_ms, jti, consumer_did, trace_id, direction)` — hashes jti and consumer_did before recording. `log_lifecycle(event, level, extra)` for startup/shutdown/key rotation. `log_credential(event, credential_jti, action)` — logs jti hash only. All methods are synchronous (no async) to avoid event loop coupling — called from synchronous logging callbacks."
+      },
+      {
+        "step": 3,
+        "title": "Implement strict redaction rules",
+        "detail": "Apply redaction at the logger boundary (before any serialization). Rules: (1) Never use raw Authorization header value — only log `auth_present: bool`. (2) Never log SentinelVP header — only log `vp_present: bool`. (3) For JWTs anywhere in `extra` dict: scan for strings matching `[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+` regex and replace with `<jwt_redacted>`. (4) For DID strings (`did:[a-z]+:[A-Za-z0-9]+`): replace with `did:*:<SHA-256[:8]>`. (5) For private key bytes: any `bytes` value in `extra` replaced with `<bytes_redacted>`. Implement `redact_dict(d: dict) -> dict` in `libs/common/logging/redaction.py` that recursively applies all rules."
+      },
+      {
+        "step": 4,
+        "title": "Configure stdout + rotating file handlers",
+        "detail": "In `SentinelLogger.setup_handlers()`: (1) `StreamHandler(sys.stdout)` with JSONFormatter — for container log collection. (2) `RotatingFileHandler('$SENTINEL_HOME/.sentinel/logs/sentinel.log', maxBytes=MAX_LOG_MB*1024*1024, backupCount=MAX_LOG_FILES)`. Config via env: `SENTINEL_LOG_MAX_MB=500`, `SENTINEL_LOG_MAX_FILES=5`, `SENTINEL_LOG_MAX_DAYS=30`. (3) Implement a daily cleanup task: delete log files older than `SENTINEL_LOG_MAX_DAYS` days from the logs directory. Disk cleanup runs every 24h as an asyncio background task."
+      },
+      {
+        "step": 5,
+        "title": "Implement in-memory ring buffer for live UI",
+        "detail": "Class `LogRingBuffer` in `libs/common/logging/ring_buffer.py`. Backed by `collections.deque(maxlen=10000)`. Thread-safe: use `threading.Lock` for append (logger may be called from sync contexts). Method `append(event: SentinelLogEvent)`. Method `get_recent(n: int, filter_decision=None, filter_service_id=None) -> list[SentinelLogEvent]`. Method `subscribe() -> asyncio.Queue`: returns a new async queue that receives forwarded events for SSE streaming (TASK-055). Max 10 concurrent subscribers — refuse new subscriptions beyond limit. On subscriber disconnect, remove queue from subscriber list."
+      },
+      {
+        "step": 6,
+        "title": "OTel log export integration",
+        "detail": "If `OTEL_EXPORTER_OTLP_ENDPOINT` is set: add `opentelemetry-sdk` OTel log bridge as a third handler. Use `LoggingInstrumentor().instrument()` to bridge Python log records to OTel. Set resource attributes: `service.name=sentinel`, `service.instance.id=instance_id`, `sentinel.role=producer|consumer`. Log severity mapping: Python CRITICAL→FATAL, ERROR→ERROR, WARNING→WARN, INFO→INFO, DEBUG→DEBUG. Body: the JSON-serialized `SentinelLogEvent`. This enables centralized log aggregation in TASK-063 (Loki via Alloy)."
+      },
+      {
+        "step": 7,
+        "title": "Integration points",
+        "detail": "SentinelLogger is a singleton initialized at app startup and injected via FastAPI dependency. InboundPipeline (TASK-045) calls `logger.log_request()` at the end of every request. OutboundPipeline (TASK-044) calls `logger.log_request()` for every outbound attempt. DIDKeyManager (TASK-039) calls `logger.log_lifecycle('key_rotation')`. RevocationManager (TASK-046) calls `logger.log_lifecycle('revocation_stale', level='WARNING')`. Never use Python's `logging.getLogger()` directly in sentinel code after this task — use injected `SentinelLogger` only (ensures consistent schema)."
+      },
+      {
+        "step": 8,
+        "title": "Tests",
+        "detail": "Test file: `tests/unit/logging/test_logger.py`. Cases: (1) JWT in extra dict is redacted; (2) raw DID in extra is masked; (3) jti_hash is only first 16 chars of SHA-256; (4) consumer_did_hash is only first 16 chars of SHA-256; (5) Authorization header value never appears in serialized log; (6) ring buffer evicts oldest on 10001th insert; (7) subscriber queue receives events pushed after subscription; (8) log event schema passes JSON serialization; (9) log levels map correctly to OTel severity (if OTel handler present); (10) retention cleanup deletes files older than max_days."
+      }
+    ]
+  },
+  "project_structure": {
+    "files": {
+      "libs/common/logging/__init__.py": "Exports SentinelLogger, get_logger()",
+      "libs/common/logging/schema.py": "SentinelLogEvent dataclass",
+      "libs/common/logging/logger.py": "SentinelLogger with all log_* methods",
+      "libs/common/logging/redaction.py": "redact_dict(), regex patterns for JWT/DID/bytes",
+      "libs/common/logging/formatter.py": "JSONFormatter for stdlib logging",
+      "libs/common/logging/ring_buffer.py": "LogRingBuffer with subscriber support",
+      "libs/common/logging/retention.py": "Log file retention/cleanup background task",
+      "tests/unit/logging/test_logger.py": "Unit tests including redaction verification"
+    }
+  },
+  "security_constraints": [
+    "JWT pattern redaction in extra dict is defense-in-depth — primary protection is never passing raw JWTs to logger",
+    "jti_hash and did_hash truncation to 16 chars prevents reconstruction while preserving correlation ability",
+    "Log files must have 0600 permissions — contain security decision metadata",
+    "Ring buffer must not store raw VC or VP content — only pre-redacted SentinelLogEvent instances",
+    "OTel export must use TLS to OTLP endpoint — plaintext log export is not acceptable for security logs"
+  ],
+  "dependencies": ["TASK-045", "TASK-012"],
+  "acceptance_criteria": [
+    "No raw JWT, Authorization header value, or full DID appears in any log output",
+    "jti_hash is exactly 16 hex chars (truncated SHA-256) in every log entry",
+    "Ring buffer correctly caps at 10000 entries with LRU eviction",
+    "Subscriber queues receive events in real-time after subscription",
+    "Log retention cleanup removes files beyond max_days threshold",
+    "All 10 test cases pass"
+  ]
+}

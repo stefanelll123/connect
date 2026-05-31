@@ -1,0 +1,2290 @@
+[
+  {
+    "id": "TASK-001",
+    "title": "Stabilirea arhitecturii de referință și a deciziilor (ADR) pentru platforma Gateway cu DID/VC și blockchain",
+    "component": "security",
+    "description": "Documentați arhitectura end-to-end (Discovery Service, Sentinels, Blockchain Trust Layer), fluxurile de date, limitele de încredere și deciziile irevocabile (DID/VC/VP model, revocare, onboarding, multi-instance, migrare). Documentul devine contractul de implementare pentru echipe.",
+    "objectives": [
+      "Produceți o arhitectură implementabilă (C4 + diagrame de secvență) pentru toate fluxurile critice",
+      "Fixați deciziile cheie și alternativele respinse (ADR) astfel încât implementarea să fie deterministă",
+      "Stabiliți clar separarea: Discovery ca orchestrare/config, Sentinels ca enforcement, Blockchain ca ancoră de trust"
+    ],
+    "implementation_details": "1) Scrieți un document „Architecture Reference” cu: componente, responsabilități, contracte API, payload-uri, stocare, rețea, și threat boundaries. 2) Desenați diagrame de secvență pentru: (a) înregistrare aplicație/serviciu, (b) onboarding sentinel, (c) emitere VC, (d) execuție request consumator→producător, (e) revocare, (f) rotație chei/cred, (g) migrare VM, (h) multi-instance. 3) Introduceți un set de ADR-uri: DID method(s), VC representation, revocation mechanism, request anti-replay approach, chain selection/deployment, secret storage. 4) Defineți „security invariants” (ex: un request trebuie să fie respins dacă status-ul credențialului este stale peste Δ; un token de enrollment este one-time; etc.).",
+    "technical_requirements": [
+      "C4 model (structură de documentare)",
+      "Diagrame de secvență (PlantUML sau Mermaid)",
+      "W3C DID Core / DID v1.1 pentru terminologie și concepte citeturn0search0turn6search3"
+    ],
+    "dependencies": [],
+    "security_considerations": [
+      "Ambiguități în rolul Discovery (trust vs routing) pot introduce bypass-uri; fixați explicit că enforcement-ul final este în Producer Sentinel",
+      "Minimizați datele sensibile în documente; marcați datele ca „public / intern / secret” și cereți redacție"
+    ],
+    "edge_cases": [
+      "Cerințe conflictuale între „Discovery central trust authority” și „decentralized auth”; rezolvați prin clarificarea rolurilor și a ancorelor on-chain",
+      "Transport routed vs direct (Discovery ca forwarder vs doar catalog) influențează request binding"
+    ],
+    "acceptance_criteria": [
+      "Există un document de arhitectură aprobat + ADR-uri numerotate și versionate",
+      "Toate fluxurile critice au diagrame de secvență și câmpuri de mesaj definite",
+      "Invariantele de securitate sunt listate și referențiate ulterior în teste"
+    ]
+  },
+  {
+    "id": "TASK-002",
+    "title": "Threat model complet și mapare la standarde de securitate pentru aplicații și servicii",
+    "component": "security",
+    "description": "Construiți un threat model practic (active, adversari, suprafețe, atacuri) pentru: înregistrare, onboarding, request signing, verificare VC/VP, revocare, migrare sentinel, multi-instance, blockchain reorg/outage. Produceți mitigări implementabile și criterii de testare.",
+    "objectives": [
+      "Acoperiți explicit amenințările cerute: rogue registration, spoofing, replay, leakage, key compromise, malicious registration",
+      "Definiți controale și teste pentru fiecare clasă de atac",
+      "Stabiliți politici default (fail-closed vs degrade) pe scenarii de outage"
+    ],
+    "implementation_details": "1) Modelați activele: chei private sentinel, chei issuer, VCs, config bundles, enrollment tokens, status lists, registry DB, chain RPC creds. 2) Catalog adversari: insider admin, atacator rețea, sentinel compromis, discovery compromis, issuer compromis, router compromis. 3) Aplicați STRIDE pe fiecare flux din TASK-001 și produceți un tabel „Threat → Impact → Likelihood → Mitigation → Test”. 4) Includeți un capitol „Outage & staleness” care formalizează Δ (bounded-freshness) și deciziile în caz de chain/RPC down. 5) Mapați la OWASP ASVS pentru controale web/service (authn, session, input validation, logging). citeturn4search3",
+    "technical_requirements": [
+      "STRIDE (sau echivalent)",
+      "OWASP ASVS ca checklist de controale citeturn4search3"
+    ],
+    "dependencies": [
+      "TASK-001"
+    ],
+    "security_considerations": [
+      "Risc de sub-modelare a atacurilor de replay și staleness; formalizați clar jti/nonce/timp și politica Δ",
+      "Risc de „confused deputy” între medii (dev/test/prod); modelați explicit cross-environment replay"
+    ],
+    "edge_cases": [
+      "Clock skew mare între sentinels și discovery produce respingeri false; definiți toleranță + NTP enforcement",
+      "Discovery compromis poate emite enrollment tokens; constrângeți prin approvals, audit, și ancore on-chain unde relevant"
+    ],
+    "acceptance_criteria": [
+      "Există un tabel Threat→Mitigation→Test pentru toate fluxurile critice",
+      "Există decizii explicite pentru fail-closed/degrade în outage-uri",
+      "Lista de mitigări este trasabilă către task-uri de implementare ulterioare"
+    ]
+  },
+  {
+    "id": "TASK-003",
+    "title": "Selectarea standardelor și a „crypto suites” pentru DID/VC/VP, request proofs și revocare",
+    "component": "security",
+    "description": "Alegeți și fixați standardele exacte și profilul de interoperabilitate: DID specs, VC data model, securing format, mecanism de status/revocare, semnare request și anti-replay. Produceți un „Standards Profile” cu algoritmi, formate media, și reguli de validare.",
+    "objectives": [
+      "Standardizați formatul de VC/VP și algoritmii de semnare pentru implementare consistentă",
+      "Stabiliți mecanismul de revocare și ancorare (bitstring status list + on-chain anchoring)",
+      "Stabiliți mecanismul de request proof (anti-replay + binding)"
+    ],
+    "implementation_details": "1) DID: adoptați DID Core ca bază semantică; urmăriți DID v1.1 CR pentru compatibilitate viitoare. citeturn0search0turn6search11 2) VC: adoptați Verifiable Credentials Data Model v2.0 (W3C Recommendation). citeturn0search1turn0search13 3) Securing: folosiți „Securing Verifiable Credentials using JOSE and COSE” și profilează pe JOSE/JWT (JWT-VC/JWT-VP) pentru implementare în Python. citeturn2search0 4) Revocation/Status: folosiți Bitstring Status List v1.0 ca mecanism de status/revocare (space-efficient). citeturn0search2 5) Request anti-replay: folosiți o schemă tip DPoP (jti/iat/htu/htm) ca referință de cerințe pentru unicitate și binding la request. citeturn0search3 6) Pentru HTTP in prezența intermediarilor, evaluați RFC 9421 (HTTP Message Signatures) și setați ca opțiune viitoare; dacă îl implementați, fixați componentele semnate și canonicalizarea. citeturn1search3 7) Transport opțional: DIDComm v2 ca adaptor alternativ (nu baseline). citeturn1search2",
+    "technical_requirements": [
+      "W3C DID Core citeturn0search0",
+      "W3C Verifiable Credentials Data Model v2.0 citeturn0search1",
+      "W3C VC-JOSE-COSE citeturn2search0",
+      "W3C Bitstring Status List v1.0 citeturn0search2",
+      "RFC 9449 (DPoP) citeturn0search3",
+      "RFC 9421 (HTTP Message Signatures) citeturn1search3",
+      "DIDComm Messaging v2.0 (opțional) citeturn1search2"
+    ],
+    "dependencies": [
+      "TASK-001",
+      "TASK-002"
+    ],
+    "security_considerations": [
+      "Divergența de formate (JSON-LD vs JWT) poate crește riscul de implementare inconsistentă; fixați explicit doar JOSE/JWT pentru MVP",
+      "Algoritmi mixti (EdDSA/ES256K) complică verificarea; definiți o matrice suportată și respingeți explicit restul"
+    ],
+    "edge_cases": [
+      "Issuer/holder folosesc DID method ne-suportat; definiți „Not Supported” și onboarding refuzat",
+      "VP include multiple VCs; definiți ordinea verificărilor și cum se agregă scope/policy"
+    ],
+    "acceptance_criteria": [
+      "Există un document „Standards Profile” cu: formate, media types, algoritmi, reguli de validare",
+      "Echipa poate implementa verificarea VC/VP fără decizii suplimentare",
+      "Există un plan de compatibilitate pentru DID v1.1 fără a rupe MVP"
+    ]
+  },
+  {
+    "id": "TASK-004",
+    "title": "Definirea schemelor de credențiale (VC) și a modelului de politici (ABAC/capability) cu binding pe mediu",
+    "component": "security",
+    "description": "Proiectați tipurile de credențiale și claims minimale pentru: identitatea sentinel, binding service↔sentinel, drepturi de acces consumer→producer, issuer trust, revocation status reference. Includeți binding pe environment (dev/test/prod) ca cerință de primă clasă.",
+    "objectives": [
+      "Definiți VCs clare și minimaliste (tipuri separate pentru identity vs access)",
+      "Standardizați claims (aud, env, scope, exp/nbf, status) pentru verificare deterministă",
+      "Definiți modelul de policy evaluation la Producer Sentinel"
+    ],
+    "implementation_details": "1) Definiți minim 3 tipuri de VC (cu @type sau echivalent în JWT claims): (a) SentinelIdentityCredential: atestă DID-ul și rolul (producer/consumer), service_id, env; (b) ServiceBindingCredential: atestă că un Sentinel DID este autorizat să reprezinte un service în env; (c) AccessGrantCredential: acordă unui consumer drepturi către un producer service (scope). 2) Pentru fiecare VC: definiți JSON schema (sau Pydantic model) cu câmpuri obligatorii: iss, sub, iat, exp, nbf, jti, env, aud (Service DID sau Producer DID), scope (listă de resurse/operații), status (bitstring status list pointer). Aliniați cu VC DM 2.0 și status list mecanism. citeturn0search1turn0search2 3) Defineți „policy evaluation contract” la Producer Sentinel: input = (consumer DID, VP/VC set, route/resource, env, context), output = Permit/Deny + reason. 4) Stabiliți reguli de compunere când sunt multiple VCs: cea mai restrictivă politică câștigă; deny dacă orice verificare critică eșuează.",
+    "technical_requirements": [
+      "W3C VC Data Model v2.0 citeturn0search1",
+      "W3C Bitstring Status List v1.0 citeturn0search2",
+      "JWT-VC/JWT-VP via VC-JOSE-COSE citeturn2search0"
+    ],
+    "dependencies": [
+      "TASK-003"
+    ],
+    "security_considerations": [
+      "Scope prea generic poate permite escaladare; cereți definirea scope-ului ca (service_id, path, method) sau ca capability-uri explicite",
+      "Binding slab pe env permite cross-environment replay; env trebuie validat atât în VC cât și în request proof"
+    ],
+    "edge_cases": [
+      "VC expirat dar în alt timezone; folosiți timp UTC și toleranță de skew controlată",
+      "Scope include wildcard-uri; definiți reguli de matching și limitați wildcard-urile în prod"
+    ],
+    "acceptance_criteria": [
+      "Există modele Pydantic + exemple complete pentru fiecare tip de VC",
+      "Există reguli de evaluare policy scrise și implementabile",
+      "Există reguli explicite de env binding și aud binding"
+    ]
+  },
+  {
+    "id": "TASK-005",
+    "title": "Specificația protocolului de onboarding/re-onboarding sigur pentru Sentinels",
+    "component": "security",
+    "description": "Definiți protocolul sigur de înrolare a unui Sentinel (producer/consumer) în Discovery Service, incluzând prevenirea rogue registration, spoofing, replay, și rotație / re-onboarding după migrare.",
+    "objectives": [
+      "Onboarding sigur cu token one-time, expirare scurtă și bind la service/rol/env",
+      "Dovadă de control asupra cheii DID (proof-of-possession) fără a expune cheia",
+      "Re-onboarding determinist pentru migrare și recovery"
+    ],
+    "implementation_details": "1) Definiți Enrollment Token (JWT semnat de Discovery) cu: token_id (jti), service_id, role, env, issued_at, exp (ex: 10 minute), allowed_instance_metadata (opțional: fingerprint host, cloud instance-id), nonce. 2) Defineți canalul de transport: mTLS între Sentinel și Discovery (Discovery verifică client cert sau token + mTLS). 3) Definiți onboarding request: Sentinel generează cheie DID (sau obține din Vault), calculează DID, trimite (enrollment_token, did, did_public_key, proof = semnătură peste challenge furnizat de Discovery). 4) Discovery emite challenge nonce unic, Sentinel îl semnează cu cheia DID; Discovery verifică semnătura folosind DID document derivat (pentru did:key) sau rezolvat. 5) Discovery marchează enrollment_token ca „consumat” atomic (DB transaction) și emite: (a) SentinelIdentityCredential, (b) config bundle, (c) endpoint-uri, (d) trust anchors (chain addresses). 6) Re-onboarding: pentru migrare, Sentinel prezintă aceeași cheie DID (sau semnătură via Vault) + un „migration ticket” emis de Discovery (one-time) pentru a re-asocia instance metadata și a re-emite config dacă e necesar.",
+    "technical_requirements": [
+      "mTLS (TLS 1.2+ / preferat 1.3)",
+      "JWT (JOSE) pentru enrollment token",
+      "W3C DID Core pentru PoP conceptual citeturn0search0",
+      "Rate limiting și audit logging (vezi TASK-035)"
+    ],
+    "dependencies": [
+      "TASK-003",
+      "TASK-004"
+    ],
+    "security_considerations": [
+      "Replay enrollment token: token one-time, verificat și invalidat atomic; logați token_id și sursa",
+      "Rogue sentinel registration: cereți approval workflow în UI + RBAC; opțional validați instance metadata (cloud attestation) în producție"
+    ],
+    "edge_cases": [
+      "Sentinel pornește onboarding, primește challenge, dar cade; token rămâne neconsumat: implementați retry cu același token până la exp",
+      "Clock skew mare: folosiți toleranță controlată pentru exp/iat și impuneți NTP"
+    ],
+    "acceptance_criteria": [
+      "Protocolul e documentat în detaliu (payload, erori, timeouts)",
+      "Enrollment token nu poate fi folosit de două ori (test concurent)",
+      "Discovery refuză onboarding dacă PoP e invalid sau token expirat"
+    ]
+  },
+  {
+    "id": "TASK-006",
+    "title": "Specificația „Request Security Envelope” pentru semnare, anti-replay și binding (aud/env/request-hash)",
+    "component": "security",
+    "description": "Definiți schema de „request proof” folosită de Consumer Sentinel și verificată de Producer Sentinel, astfel încât să reziste la replay și să lege credențialele de request, audiență și environment. Folosiți DPoP ca referință pentru proprietăți (jti/iat/binding). citeturn0search3",
+    "objectives": [
+      "Anti-replay determinist (jti + replay cache) și fereastră de timp mică",
+      "Binding pe aud (producer/service DID) și env (dev/test/prod) pentru non-confusion",
+      "Integrabil atât în HTTP cât și în adaptoare viitoare (DIDComm/MQTT)"
+    ],
+    "implementation_details": "1) Defineți un obiect „ProofClaims” (JSON) cu câmpuri obligatorii: iss (Consumer Sentinel DID), aud (Producer Service DID), env, iat, exp (ex: iat+30s), jti (UUIDv4), req = {method, path, query_hash, body_hash, content_type}, nonce (emis de Producer sau Discovery per-session), trace_id. 2) Semnați ProofClaims ca JWS compact (Authorization: SentinelProof <JWS>) folosind cheia DID a Consumer Sentinel (JOSE conform VC-JOSE-COSE). citeturn2search0 3) Atașați VP (JWT-VP) separat (header: SentinelVP) sau includeți doar referință (vp_hash) și trimiteți VP în body multipart—dar fixați o singură variantă pentru MVP. 4) Producer verifică: semnătura JWS, exp/iat în fereastră, aud/env match, body_hash recalculat, jti unic (replay cache), nonce valid. 5) Dacă traficul trece prin intermediari care pot re-scrie URL, documentați ce anume intră în „path” și „host”; alternativ, profilați RFC 9421 ca mod avansat pentru semnătură pe componente HTTP canonice. citeturn1search3",
+    "technical_requirements": [
+      "RFC 9449 (DPoP) ca model de unicitate și binding citeturn0search3",
+      "W3C VC-JOSE-COSE pentru semnare JOSE/JWS citeturn2search0",
+      "RFC 9421 (opțional, pentru HTTP component signatures) citeturn1search3"
+    ],
+    "dependencies": [
+      "TASK-003",
+      "TASK-004"
+    ],
+    "security_considerations": [
+      "Replay rapid în aceeași fereastră (30s): replay cache pe jti obligatoriu, cu TTL >= exp-iat",
+      "Exfiltrare VP: minimizați datele din VP și redactați log-urile; evitați includerea completă a VP în logs"
+    ],
+    "edge_cases": [
+      "Body mare/streaming: body_hash trebuie calculat streaming; dacă nu, limitați dimensiunea sau folosiți hash incremental",
+      "Request fără body (GET): body_hash = hash(empty) definit explicit"
+    ],
+    "acceptance_criteria": [
+      "Schema ProofClaims este publicată și versionată (v1)",
+      "Producer respinge request dacă jti a mai fost văzut sau dacă body_hash nu corespunde",
+      "Există reguli explicite pentru toleranță de timp și validarea nonce"
+    ]
+  },
+  {
+    "id": "TASK-007",
+    "title": "Specificația mecanismului de revocare/status cu Bitstring Status List și bounded-freshness Δ",
+    "component": "security",
+    "description": "Definiți cum se publică, distribuie, verifică și cache-uiește status-ul credențialelor folosind Bitstring Status List v1.0 și o garanție de prospețime bounded (Δ). citeturn0search2",
+    "objectives": [
+      "Revocare scalabilă (bitstring) și verificabilă",
+      "Control de staleness prin Δ și politici fail-closed/degrade",
+      "Ancorare on-chain pentru integritate (hash/root + timestamp)"
+    ],
+    "implementation_details": "1) Adoptați Bitstring Status List v1.0 pentru publicarea status-ului (revoked/suspended) și includeți referința în VC (statusListCredential + index). citeturn0search2 2) Defineți Δ (ex: 10 minute în prod, 60 minute în dev) și comportamentul: dacă latest_status_age > Δ, Producer Sentinel intră în „stale mode” și aplică politica configurată (default: fail-closed pentru operații sensibile). 3) Defineți formatul de publicare: Discovery generează periodic status list credential (semnat), îl servește via HTTPS (cache-control) și scrie pe chain un anchor (hash + updatedAt) în StatusRegistry. 4) Definiți un „emergency revoke path”: pentru compromitere severă, scrieți direct pe chain un flag de revocare per-credential-id (cost mai mare, rar). 5) Stabiliți reguli de cache: sentinel ține în memorie + pe disk status list(s), asociat cu updatedAt on-chain; verifică integritatea comparând hash-ul.",
+    "technical_requirements": [
+      "W3C Bitstring Status List v1.0 citeturn0search2",
+      "W3C VC Data Model v2.0 citeturn0search1",
+      "HTTPS pentru distribuție + cache headers"
+    ],
+    "dependencies": [
+      "TASK-003",
+      "TASK-004"
+    ],
+    "security_considerations": [
+      "Atac de downgrade (servește status list vechi): ancora on-chain + verificare hash previne; respinge dacă mismatch",
+      "Outage chain/RPC: sentinel poate rămâne fără updatedAt; definește fallback (cache + max-age) și fail-closed după Δ"
+    ],
+    "edge_cases": [
+      "Index în status list în afara bitstring-ului: respinge VC ca invalid",
+      "Multiple status lists per issuer: definiți naming/ID și rotația listelor"
+    ],
+    "acceptance_criteria": [
+      "Δ și politicile stale-mode sunt definite și testabile",
+      "Există un mecanism de comparare hash(statusList) vs anchor on-chain",
+      "Există un flux de emergency revoke documentat (rar, dar implementat)"
+    ]
+  },
+  {
+    "id": "TASK-008",
+    "title": "Specificația multi-instance și migrare Sentinel cu continuitate de identitate și reînrolare",
+    "component": "security",
+    "description": "Definiți mecanismele care permit: (a) multiple instanțe Sentinel pentru același service (load distribution), (b) migrare VM/host fără schimbare de identitate, (c) re-registration/rejoin cu același DID și credențiale, (d) rotație controlată de chei.",
+    "objectives": [
+      "Permiteți scaling orizontal fără a schimba identitatea expusă (DID constant)",
+      "Permiteți migrare/redeploy cu același DID prin secret storage partajat (Vault/KMS) sau backup criptat",
+      "Permiteți reînrolare sigură după incident"
+    ],
+    "implementation_details": "1) Alegeți modelul MVP: un DID logic per (service_id, role, env), partajat între instanțe; instanțele au un instance_id ephemer (UUID) pentru observabilitate. 2) Definiți backend-ul de chei: (a) Vault/KMS (preferat) pentru producție; (b) local encrypted file pentru dev/single-host. 3) Definiți rejoin: o instanță nouă recuperează cheia DID din backend, semnează un challenge de la Discovery (PoP) și își actualizează instance metadata + endpoints. 4) Definiți rotația cheii: generați cheie nouă în backend, publicați update de DID Document (dacă DID method suportă), re-emiteți VCs și revocați cele vechi; includeți „grace period” pentru rollout multi-instance.",
+    "technical_requirements": [
+      "Secret storage (Vault Transit/KV sau cloud KMS)",
+      "PoP challenge-response (vezi TASK-005)",
+      "Config management versionat (bundle version + rollback)"
+    ],
+    "dependencies": [
+      "TASK-005",
+      "TASK-006",
+      "TASK-007"
+    ],
+    "security_considerations": [
+      "Cheie partajată între instanțe crește blast radius; mitigați prin hardening host, Vault policies stricte și rotație periodică",
+      "Migrare prin backup file: riscul de exfiltrare; backup trebuie criptat cu cheie separată și parolă/secret out-of-band"
+    ],
+    "edge_cases": [
+      "Două instanțe pornesc simultan și ambele încearcă rejoin; Discovery trebuie să accepte multi-instance și să trateze idempotent",
+      "Rotație chei în timp ce există trafic: suportă verificare cu cheie veche în grace window"
+    ],
+    "acceptance_criteria": [
+      "Există o specificație completă pentru multi-instance și migrare",
+      "Modelul de stocare a cheilor are două moduri (prod/dev) clar definite",
+      "Rotația cheilor are pași și fereastră de compatibilitate explicită"
+    ]
+  },
+  {
+    "id": "TASK-009",
+    "title": "Monorepo scaffold și standardizare dezvoltare (format, lint, test, packaging) pentru componente Python + frontend + contracte",
+    "component": "infrastructure",
+    "description": "Creați structura de repository, standarde de cod, și pipeline local de dezvoltare pentru: discovery-service (Python), sentinel (Python), shared libs (Python), blockchain contracts (Solidity), frontend (React/MUI).",
+    "objectives": [
+      "Structură repo clară și unificată pentru echipe multiple",
+      "Reproducibilitate locală (make targets) și standarde unice de cod",
+      "Separare clară între shared crypto libs și aplicații"
+    ],
+    "implementation_details": "1) Creați structura: /services/discovery, /services/sentinel, /libs/common (crypto, did/vc, http-proof), /contracts, /frontend/discovery-ui. 2) Standardizați Python: pyproject.toml, ruff, mypy, pytest, uvicorn, FastAPI, Pydantic. 3) Standardizați Node/React: package.json, eslint, prettier, vite/cra (alegeți unul). 4) Adăugați script-uri: make lint/test/build, plus pre-commit hooks. 5) Defineți versionare semantică internă pentru shared libs și API schema versioning (v1).",
+    "technical_requirements": [
+      "Python 3.11+",
+      "FastAPI + Pydantic",
+      "pytest + ruff + mypy",
+      "Node 20+ (pentru React/Hardhat)"
+    ],
+    "dependencies": [
+      "TASK-001",
+      "TASK-003"
+    ],
+    "security_considerations": [
+      "Supply-chain risk din dependențe; blocați versiuni (lockfiles) și activați scanări în CI (vezi TASK-064)",
+      "Evitați includerea de secrete în repo; adăugați secret scanning și gitignore strict"
+    ],
+    "edge_cases": [
+      "Conflicte de versiuni între libs comune și servicii; impuneți constraints și renovate/dependabot",
+      "Diferențe OS (Windows/Linux) în script-uri; folosiți Docker pentru toolchain consistent"
+    ],
+    "acceptance_criteria": [
+      "Repo build/test rulează local cu un singur command (make test)",
+      "Linting + typing rulează în CI și local identic",
+      "Structura separă clar shared libs și aplicațiile"
+    ]
+  },
+  {
+    "id": "TASK-010",
+    "title": "Environment local reproducibil: docker-compose pentru Discovery, Sentinel, DB, cache și blockchain devnet",
+    "component": "infrastructure",
+    "description": "Construiți un mediu local complet (docker-compose) care permite dezvoltare și E2E tests: Discovery Service + Postgres + Redis + Sentinel producer/consumer + blockchain local (Anvil/Hardhat node) + observability minimal.",
+    "objectives": [
+      "Pornire one-command pentru dezvoltare și demos",
+      "Infrastructură minimă pentru replay cache și job-uri async",
+      "Blockchain local pentru contract tests și integrare web3"
+    ],
+    "implementation_details": "1) docker-compose.yaml cu servicii: postgres, redis, discovery, sentinel-consumer, sentinel-producer, hardhat-node/anvil, optional otel-collector. 2) Configurează networking și healthchecks; folosește profiles (dev/test). 3) Seed script: deploy contracte pe chain local, configurează Discovery cu adrese contracte și chei de test; emite 1-2 VCs demo. 4) Include un script de reset (drop volumes) pentru reproducibilitate.",
+    "technical_requirements": [
+      "Docker + Docker Compose",
+      "PostgreSQL 15+",
+      "Redis 7+",
+      "Hardhat node sau Anvil (devnet EVM)"
+    ],
+    "dependencies": [
+      "TASK-009"
+    ],
+    "security_considerations": [
+      "Nu reutilizați cheile de dev în alte medii; generați chei per-run",
+      "Expuneți porturi doar pe localhost în compose pentru a evita acces neautorizat"
+    ],
+    "edge_cases": [
+      "Race condition la startup (Discovery înainte de DB ready); folosiți wait-for-it/healthchecks",
+      "Chain reset schimbă adrese; seed script trebuie să actualizeze config automat"
+    ],
+    "acceptance_criteria": [
+      "docker compose up pornește întreg stack-ul fără pași manuali",
+      "Există seed demo care permite un request consumer→producer valid",
+      "Reset recreează mediu curat în <5 minute"
+    ]
+  },
+  {
+    "id": "TASK-011",
+    "title": "Abstracție de secret storage și bootstrap pentru chei: mod local criptat și mod Vault/KMS",
+    "component": "security",
+    "description": "Definiți și implementați un „SecretStorage Interface” utilizabil de Discovery și Sentinel pentru: chei DID, chei issuer, chei JWT enrollment, și credențiale persistente. Includeți două backend-uri: local encrypted (dev) și Vault/KMS (prod).",
+    "objectives": [
+      "Eliminați dependența de fișiere plaintext pentru chei",
+      "Permiteți scaling/migrare sentinel prin storage partajat",
+      "Asigurați rotație și versionare a secretelor"
+    ],
+    "implementation_details": "1) Specificați API-ul: get_secret(name, version), put_secret(name, value), rotate_secret(name), list_versions(name), delete_version(name). 2) Backend local: fișier JSON criptat cu AES-GCM; master key din env var + key derivation (scrypt/argon2) și file perms 0600. 3) Backend Vault: KV v2 pentru stocare + opțional Transit pentru semnare fără export cheie. 4) Integrați audit: logați accesările de secret (fără value), cu actor și scop. 5) Adăugați mecanism de „sealed config”: un singur bundle criptat pentru sentinel (export/import).",
+    "technical_requirements": [
+      "Python cryptography (AES-GCM)",
+      "HashiCorp Vault API (opțional, producție)",
+      "Principiul least-privilege pentru acces la secrete"
+    ],
+    "dependencies": [
+      "TASK-008",
+      "TASK-009"
+    ],
+    "security_considerations": [
+      "Master key expus în env vars: în prod folosiți KMS/Vault și evitați static env secrets",
+      "Vault token leakage: folosiți short-lived tokens, AppRole/Kubernetes auth și restricții de policy"
+    ],
+    "edge_cases": [
+      "Corupere fișier local: implementați snapshot/backup și verificare integritate (HMAC)",
+      "Vault indisponibil: definește behavior (fail start vs degrade cu cache local) per componentă"
+    ],
+    "acceptance_criteria": [
+      "Există interfață comună plus 2 implementări (local + vault)",
+      "Cheile nu apar în logs și nu sunt scrise plaintext pe disk",
+      "Există teste unitare pentru criptare/decriptare și rotație"
+    ]
+  },
+  {
+    "id": "TASK-012",
+    "title": "Specificația de observabilitate: metrici, trace-uri, log-uri, corelare și retenție",
+    "component": "infrastructure",
+    "description": "Definiți standardul intern de observabilitate: ce metrici, ce semnale de tracing, cum se structurează log-urile, cum se corelează request-urile între consumer/prod/discovery, și ce se redactează.",
+    "objectives": [
+      "Asigurați debugging și audit fără a expune secrete",
+      "Standardizați instrumentarea OpenTelemetry pentru servicii Python",
+      "Stabiliți stack-ul de colectare log-uri compatibil cu statusul actual al agenților (Alloy vs Promtail)"
+    ],
+    "implementation_details": "1) Definește un „Telemetry Spec”: trace_id, span_id, correlation_id, request_id, service_id, env, sentinel_role, instance_id. 2) Tracing: OpenTelemetry SDK + OTLP export către Collector. citeturn5search7turn5search3 3) Instrumentare FastAPI: folosiți opentelemetry-instrumentation-fastapi. citeturn4search0 4) Metrici: expuneți endpoint /metrics în format Prometheus; urmați ghidurile de client libs și format. citeturn4search1 5) Logging agent: nu folosiți Promtail (EOL 2 Mar 2026); utilizați Grafana Alloy (distribuție OTel Collector) pentru logs/metrics/traces. citeturn5search1turn5search13turn5search14 6) Definiți redactare: nu logați VCs/VPs complete; logați doar hash/ids și decizii (permit/deny + reason).",
+    "technical_requirements": [
+      "OpenTelemetry (spec + collector) citeturn5search7turn5search3",
+      "OpenTelemetry FastAPI instrumentation citeturn4search0",
+      "Prometheus exposition format citeturn4search1",
+      "Grafana Alloy ca agent unificat citeturn5search14turn5search1"
+    ],
+    "dependencies": [
+      "TASK-001",
+      "TASK-009"
+    ],
+    "security_considerations": [
+      "PII/secrete în logs: aplicați redactare și allow-list de câmpuri logabile",
+      "Trace propagation poate expune metadate; includeți doar identificatori tehnici și evitați payload-uri"
+    ],
+    "edge_cases": [
+      "Explozie de cardinalitate în label-uri Prometheus (ex: user-id); interziceți label-uri necontrolate",
+      "Backpressure la logs: definește sampling și fallback (drop policy) pentru a nu opri request path"
+    ],
+    "acceptance_criteria": [
+      "Există un document Telemetry Spec adoptat de Discovery și Sentinel",
+      "Toate componentele au /metrics și export OTLP configurabil",
+      "Stack-ul de log shipping folosește Alloy, nu Promtail"
+    ]
+  },
+  {
+    "id": "TASK-013",
+    "title": "Smart contract workspace: Hardhat, config rețele (local + Sepolia) și pipeline de build/test",
+    "component": "blockchain",
+    "description": "Inițializați proiectul de contracte Solidity, testare și deployment pe devnet și Sepolia. Includeți configurare sigură a cheilor și export de ABI pentru integrare Python.",
+    "objectives": [
+      "Toolchain contracte reproducibil și testabil",
+      "Deployment automat pe chain local și Sepolia",
+      "Artefacte ABI versionate pentru web3.py"
+    ],
+    "implementation_details": "1) Creați /contracts cu Hardhat: compile, test, deploy scripts. 2) Configurați rețele: local (hardhat/anvil) și Sepolia (chainId 11155111). citeturn3search6 3) Adăugați gestionare secrete: private keys în vault/CI secrets, niciodată în repo. 4) Exportați ABI + address map într-un fișier JSON versionat (de ex: deployments/sepolia.json). 5) Includeți gas settings și confirmation policy (ex: wait 2 blocuri pe testnet).",
+    "technical_requirements": [
+      "Solidity ^0.8.x",
+      "Hardhat",
+      "Sepolia chainId 11155111 citeturn3search6"
+    ],
+    "dependencies": [
+      "TASK-009",
+      "TASK-003"
+    ],
+    "security_considerations": [
+      "Chei de deploy compromise: folosiți conturi separate per environment și rotație; limitați fondurile",
+      "Folosirea de RPC public poate expune metadate; în prod folosiți RPC privat sau provider de încredere"
+    ],
+    "edge_cases": [
+      "Testnet reorg: așteptați confirmări și tratați tx dropped/replaced",
+      "Schimbare adrese contracte între deploy-uri: Discovery trebuie să suporte config update atomic"
+    ],
+    "acceptance_criteria": [
+      "hardhat test rulează și trece în CI",
+      "Există deploy script pentru local și Sepolia",
+      "ABI + address map sunt exportate pentru integrare Python"
+    ]
+  },
+  {
+    "id": "TASK-014",
+    "title": "Contract IssuerRegistry: registru on-chain pentru issuers și starea lor (active/disabled)",
+    "component": "blockchain",
+    "description": "Implementați un contract care definește cine are voie să emită ce tipuri de credențiale (issuer registry). Acesta permite dezactivarea rapidă a unui issuer compromis fără a depinde de Discovery.",
+    "objectives": [
+      "Listă on-chain de issuers autorizați și domeniul lor (env, schemas)",
+      "Evenimente pentru audit și indexare",
+      "Control de acces robust (governance roles)"
+    ],
+    "implementation_details": "1) Definiți structura: issuerId (bytes32 hash DID sau address), active(bool), allowedSchemas(bytes32[]), allowedEnvs(uint8 bitmask), metadataURI(string). 2) Funcții: addIssuer, updateIssuer, disableIssuer, enableIssuer, isIssuerAllowed(issuerId, schema, env). 3) Emiteți events pentru fiecare schimbare. 4) Control acces: folosiți OpenZeppelin AccessControl (DEFAULT_ADMIN_ROLE + ISSUER_ADMIN_ROLE). citeturn3search1 5) Includeți protecție de input (max array size) pentru a preveni gas griefing.",
+    "technical_requirements": [
+      "OpenZeppelin AccessControl citeturn3search1",
+      "EVM event indexing"
+    ],
+    "dependencies": [
+      "TASK-013",
+      "TASK-004"
+    ],
+    "security_considerations": [
+      "Privilege escalation prin roluri: separați admin de operator; folosiți multisig ca admin în medii non-dev",
+      "DoS prin input arrays mari: limitați mărimea și validați"
+    ],
+    "edge_cases": [
+      "Issuer ID coliziune hash: folosiți keccak256(DID string) și documentați encoding",
+      "Revocarea issuer în timp ce există VCs active: Sentinel trebuie să respingă imediat VCs de la issuer disabled"
+    ],
+    "acceptance_criteria": [
+      "Contractul expune o funcție isIssuerAllowed folosită de Sentinels",
+      "Role-based access funcționează și are teste",
+      "Events sunt emise pentru toate mutațiile"
+    ]
+  },
+  {
+    "id": "TASK-015",
+    "title": "Contract TrustPolicyRegistry: definirea schemelor VC și a politicilor de trust per environment",
+    "component": "blockchain",
+    "description": "Implementați un contract care publică (a) care „credential schemas/types” sunt recunoscute și (b) parametri de politică globală (ex: Δ recomandat, mod degradare). Scop: un set minim de politici non-volatile ancorate on-chain.",
+    "objectives": [
+      "Ancorare on-chain pentru tipuri de credențiale acceptate",
+      "Publicarea parametrilor globali de verificare (ex: maxSkewSeconds, recommendedDeltaSeconds)",
+      "Bază pentru guvernanță și audit (events)"
+    ],
+    "implementation_details": "1) Modelați schemaId = bytes32 (hash al unui string canonic: ex 'SentinelIdentityCredential:v1'). 2) Stocați pentru fiecare schema: enabled(bool), requiredClaimsMask(optional), minValiditySeconds(optional), envBitmask. 3) Stocați parametri globali: recommendedDeltaSeconds, maxClockSkewSeconds, maxProofTtlSeconds. 4) Funcții admin: setGlobalParams, enableSchema, disableSchema. 5) Control acces identic cu IssuerRegistry (PolicyAdmin role).",
+    "technical_requirements": [
+      "OpenZeppelin AccessControl citeturn3search1",
+      "Contract events pentru schimbări"
+    ],
+    "dependencies": [
+      "TASK-013",
+      "TASK-004"
+    ],
+    "security_considerations": [
+      "Politici setate greșit (ex: Δ prea mare) cresc fereastra de risc; impuneți intervale min/max în contract",
+      "Mutații frecvente cresc cost; păstrați doar parametri non-volatili on-chain"
+    ],
+    "edge_cases": [
+      "Schema dezactivată dar Sentinels încă au cache; Sentinel trebuie să refetch policy la interval fix și la startup",
+      "Conflict între policy on-chain și config local: policy on-chain are prioritate pentru controale de securitate"
+    ],
+    "acceptance_criteria": [
+      "Contractul oferă global params și schema registry query functions",
+      "Există validări de interval (min/max) pentru parametri",
+      "Evenimente sunt indexabile (schema enabled/disabled, params changed)"
+    ]
+  },
+  {
+    "id": "TASK-016",
+    "title": "Contract StatusRegistry: ancorare hash-uri pentru Bitstring Status Lists și emergency revocation",
+    "component": "blockchain",
+    "description": "Implementați contractul care păstrează ancore verificabile pentru status lists (hash + timestamp) și un mecanism de emergency revocation per credential pentru incidente severe.",
+    "objectives": [
+      "Integritate verificabilă a status list publicate off-chain",
+      "Suport pentru emergency revoke rapid, independent de Discovery",
+      "Evenimente pentru audit + indexare"
+    ],
+    "implementation_details": "1) Definește statusListId = bytes32 (hash al URL-ului canonic sau al unui DID URL). 2) Mapping: statusListId → {rootHash(bytes32), updatedAt(uint64), issuerId(bytes32)}. 3) Funcții: publishStatusAnchor(statusListId, rootHash, updatedAt) doar de issuer autorizat; verify helper view. 4) Emergency revoke: mapping credentialIdHash(bytes32) → revoked(bool), revokedAt. 5) Integrare cu IssuerRegistry: publishStatusAnchor permis doar dacă issuer e active. 6) Documentați că status list e conform Bitstring Status List v1.0. citeturn0search2",
+    "technical_requirements": [
+      "W3C Bitstring Status List v1.0 citeturn0search2",
+      "Event logs + mapping storage"
+    ],
+    "dependencies": [
+      "TASK-013",
+      "TASK-014",
+      "TASK-007"
+    ],
+    "security_considerations": [
+      "Issuer compromis poate publica hash rău intenționat; mitigare: dezactivați issuer în IssuerRegistry + audit rapid",
+      "updatedAt fals: impuneți monotonicity (updatedAt >= previousUpdatedAt) și limite de drift"
+    ],
+    "edge_cases": [
+      "Dublă publicare cu același rootHash: idempotent; nu emite event duplicat sau marcați distinct",
+      "Emergency revoke pentru credentialId necunoscut: permis (pre-emptiv), dar logați"
+    ],
+    "acceptance_criteria": [
+      "Contractul poate ancora rootHash și timestamp per statusListId",
+      "Emergency revoke este queryable și folosit de Sentinels",
+      "Testele acoperă monotonicity și control acces"
+    ]
+  },
+  {
+    "id": "TASK-017",
+    "title": "Contract ServiceRegistry: binding stabil service_id ↔ Producer Service DID și (opțional) ancorare hash service descriptor",
+    "component": "blockchain",
+    "description": "Implementați un contract pentru metadata stabile de trust: proprietatea asupra serviciului și DID-ul producer-ului (sau service DID). Nu stocați endpoint-uri volatile on-chain; opțional ancorați hash(service descriptor) pentru tamper-evidence.",
+    "objectives": [
+      "Asociați service_id/environment cu DID-ul producer autorizat",
+      "Permiteți verificare că un service descriptor distribuit de Discovery aparține producer-ului",
+      "Evitați stocarea datelor volatile (endpoint-uri) pe chain"
+    ],
+    "implementation_details": "1) Definește serviceKey = keccak256(namespace, service_id, env). 2) Mapping: serviceKey → producerServiceDidHash(bytes32), owner(bytes32 issuerId sau address), active(bool). 3) Funcții: registerService(serviceKey, didHash), deactivateService, rotateServiceDid. 4) Opțional: publishDescriptorAnchor(serviceKey, descriptorHash, ts) pentru audit; nu include endpoint în clar. 5) Control acces: doar owner sau governance role poate muta/rota. 6) Event-uri obligatorii pentru toate schimbările.",
+    "technical_requirements": [
+      "Keccak256 hashing",
+      "OpenZeppelin AccessControl citeturn3search1"
+    ],
+    "dependencies": [
+      "TASK-013",
+      "TASK-014",
+      "TASK-001"
+    ],
+    "security_considerations": [
+      "Front-running la registerService: folosiți ownership pre-provisioning sau includeți approval off-chain înainte de tx",
+      "Leakage metadata: evitați string-uri plaintext; folosiți hash-uri"
+    ],
+    "edge_cases": [
+      "Service re-înregistrat cu alt DID în același env: necesita rotație explicită și audit",
+      "Env mismatch: serviceKey include env, deci nu amestecați dev/prod"
+    ],
+    "acceptance_criteria": [
+      "ServiceRegistry permite query rapid serviceKey→producer DID hash",
+      "Descriptor hash anchoring funcționează și este indexabil",
+      "Contractul nu stochează endpoint-uri sau URL-uri operaționale"
+    ]
+  },
+  {
+    "id": "TASK-018",
+    "title": "Hardening contracte: upgradeability controlată și separarea rolurilor de guvernanță",
+    "component": "blockchain",
+    "description": "Introducerea unui model de upgrade (dacă e necesar) și a controlului de acces robust pentru contracte (IssuerRegistry, TrustPolicyRegistry, StatusRegistry, ServiceRegistry).",
+    "objectives": [
+      "Evitați blocarea pe bug-uri prin upgrade controlat (non-dev)",
+      "Separați rolurile admin/operator și pregătiți integrare cu multisig",
+      "Reduceți riscul de backdoor-uri și selector clashing"
+    ],
+    "implementation_details": "1) Decideți un model: TransparentUpgradeableProxy sau UUPS; documentați decizia. citeturn3search0 2) Implementați roluri cu AccessControl și faceți admin = multisig (în testnet/prod). citeturn3search1 3) Adăugați timelock la upgrade în medii non-dev (opțional în MVP, dar design-ul trebuie prevăzut). 4) Adăugați mecanisme de pause (emergency) pentru publish operations (ex: StatusRegistry). 5) Scrieți un „upgrade playbook”: cum se rulează, ce verificări, cum se face rollback.",
+    "technical_requirements": [
+      "OpenZeppelin proxies citeturn3search0",
+      "OpenZeppelin access control citeturn3search1"
+    ],
+    "dependencies": [
+      "TASK-014",
+      "TASK-015",
+      "TASK-016",
+      "TASK-017"
+    ],
+    "security_considerations": [
+      "Upgrade key compromise: folosiți multisig + timelock + separare de rol",
+      "Complexitate: dacă upgradeability nu e necesară în MVP, păstrați contracte non-upgradeable în dev și planificați cutover"
+    ],
+    "edge_cases": [
+      "Upgrade schimbă storage layout: includeți tests de storage compatibility",
+      "Pause abuzat de admin: auditați și limitați rolurile operative"
+    ],
+    "acceptance_criteria": [
+      "Există un model de upgrade implementat sau justificat explicit ca exclus din MVP",
+      "Rolurile sunt separate și testate (admin vs operator)",
+      "Există document de procedură upgrade"
+    ]
+  },
+  {
+    "id": "TASK-019",
+    "title": "Testare și analiză contracte: unit tests, invariants și verificări de securitate",
+    "component": "blockchain",
+    "description": "Scrieți teste exhaustive pentru contracte și integrați analiză statică de securitate. Obiectiv: prevenirea bug-urilor de access control, monotonicity, și input validation.",
+    "objectives": [
+      "Unit tests pentru toate funcțiile publice și pentru toate rolurile",
+      "Invariants: monotonic updatedAt, role enforcement, schema enable/disable",
+      "Automatizare în CI"
+    ],
+    "implementation_details": "1) Scrieți teste Hardhat pentru: add/disable/enable issuers; publish anchors; emergency revoke; register service; policy params. 2) Testați scenarii negative: role missing, arrays prea mari, timestamps invalid. 3) Adăugați property/invariant tests (ex: updatedAt nu scade). 4) Integrați analiză statică (ex: Slither) în CI și tratați findings ca blockers (cu allowlist justificat).",
+    "technical_requirements": [
+      "Hardhat testing",
+      "Static analysis (Slither sau echivalent)"
+    ],
+    "dependencies": [
+      "TASK-018"
+    ],
+    "security_considerations": [
+      "Fals pozitive în analiză statică pot ascunde probleme reale; revizuiți manual findings critice",
+      "Testele trebuie să acopere rolurile și upgrade paths (dacă există)"
+    ],
+    "edge_cases": [
+      "Gas griefing prin input; testați limite și revert reasons",
+      "Evenimente incomplete: indexer-ul depinde de ele; validați că sunt emise"
+    ],
+    "acceptance_criteria": [
+      "Coverage >80% pentru contracte (sau justificare exactă)",
+      "CI eșuează dacă Slither găsește issues High/Critical",
+      "Invariants trec în mod determinist"
+    ]
+  },
+  {
+    "id": "TASK-020",
+    "title": "Integrare blockchain în Python: client web3.py async + indexer de evenimente",
+    "component": "blockchain",
+    "description": "Implementați un modul Python care interacționează cu contractele: query (read) pentru Sentinels și write (publish anchors) pentru Discovery. Includeți un indexer de evenimente pentru a popula DB-ul Discovery cu starea chain-ului.",
+    "objectives": [
+      "Client web3.py robust (timeouts, retries, confirmation handling)",
+      "Caching stratificat pentru query-uri frecvente (issuer list, policy params)",
+      "Indexer event-driven pentru audit și UI"
+    ],
+    "implementation_details": "1) Creați un pachet Python /libs/chain cu web3.py; folosiți AsyncHTTPProvider pentru non-blocking I/O. citeturn3search11 2) Implementați un „ContractGateway” per contract cu metode: getIssuerStatus, isIssuerAllowed, getGlobalParams, getStatusAnchor, isEmergencyRevoked, getServiceDidHash. 3) Implementați publish methods pentru Discovery: publishStatusAnchor, emergencyRevoke (semnare tranzacții cu cheie în secret storage). 4) Indexer: un worker care rulează periodic sau pe websocket (dacă disponibil) și procesează logs (events) pe intervale; persistă în DB: last_processed_block, events tabel. 5) Tratați chain reorg: salvați blockHash, reprocesează N blocuri în urmă (finality window).",
+    "technical_requirements": [
+      "web3.py AsyncHTTPProvider citeturn3search11",
+      "ABI artifacts din Hardhat (TASK-013)",
+      "Retry/backoff + circuit breaker"
+    ],
+    "dependencies": [
+      "TASK-013",
+      "TASK-019",
+      "TASK-011"
+    ],
+    "security_considerations": [
+      "RPC poisoning / results inconsistente: folosiți mai multe RPC endpoints și comparați pentru operații critice (opțional)",
+      "Cheia de tranzacționare Discovery: stocați în Vault/KMS și limitați rolul (doar publish anchors)"
+    ],
+    "edge_cases": [
+      "RPC rate limiting: implementați caching și backoff; degrade mode pentru UI",
+      "Indexer rămâne în urmă: folosiți batch processing și monitorizați lag"
+    ],
+    "acceptance_criteria": [
+      "Clientul poate citi toate contractele și poate publica anchors pe chain local",
+      "Indexer persistă last_processed_block și poate relua după restart",
+      "Există teste de reorg simulation (minimum: reprocess N blocks)"
+    ]
+  },
+  {
+    "id": "TASK-021",
+    "title": "Discovery Service: foundation FastAPI (async), config management și structură de servicii",
+    "component": "discovery-service",
+    "description": "Implementați baza Discovery Service: FastAPI app, configurare per environment, lifecycle hooks, logging, request tracing, și structură internă (routers/services/repositories).",
+    "objectives": [
+      "Bază stabilă pentru API-uri multiple și UI admin",
+      "Config determinist: env vars + config files versionate",
+      "Observabilitate de bază încă din prima versiune"
+    ],
+    "implementation_details": "1) Creați FastAPI app cu routers: auth, apps, services, sentinels, credentials, revocations, registry, audit, chain. 2) Folosiți Pydantic Settings pentru config; separați secrets de config non-secret. 3) Adăugați middleware: request_id, correlation_id, structured logging. 4) Implementați handling erori standard (problem+json). 5) Adăugați OpenAPI tags și versioning /api/v1.",
+    "technical_requirements": [
+      "FastAPI",
+      "Pydantic v2",
+      "Uvicorn",
+      "OpenTelemetry instrumentation (vezi TASK-036)"
+    ],
+    "dependencies": [
+      "TASK-009",
+      "TASK-012"
+    ],
+    "security_considerations": [
+      "CORS și headers: default deny; activați doar pentru UI domain",
+      "Validation strictă pe input pentru a evita injection în DB/logs"
+    ],
+    "edge_cases": [
+      "Upgrade schema API: versioning /v1 și backward compatibility policy",
+      "Request body mare: impuneți limită (ex: 2MB) pentru endpoint-uri administrative"
+    ],
+    "acceptance_criteria": [
+      "Discovery pornește și expune OpenAPI la /docs",
+      "Structura proiectului permite adăugare de endpoint-uri fără refactor major",
+      "Există logging structurat pentru fiecare request"
+    ]
+  },
+  {
+    "id": "TASK-022",
+    "title": "Discovery Service: model de date, DB schema și migrații (PostgreSQL + Alembic)",
+    "component": "discovery-service",
+    "description": "Definește schema DB pentru registry și operații: aplicații, servicii, sentinels, enrollment tokens, config bundles, credențiale, status lists, revocation events, audit log, chain events.",
+    "objectives": [
+      "Persistență robustă și auditabilă pentru lifecycle",
+      "Idempotency și concurență controlată (tokens, onboarding)",
+      "Bază pentru UI admin și raportare"
+    ],
+    "implementation_details": "1) Alegeți ORM: SQLAlchemy 2.0 (async) sau SQLModel; fixați una. 2) Definiți tabele: apps, services, sentinels, sentinel_instances, enrollment_tokens (one-time, consumed_at), credentials (metadata + encrypted blob pointer), status_lists (id, url, current_hash, updated_at), revocations (credential_id, reason, ts), audit_events (append-only), chain_events, policy_snapshots. 3) Adăugați constrângeri: unique(service_id, env), unique(sentinel_did, role, env), unique(enrollment_token_jti). 4) Migrații Alembic și seed minimal pentru dev.",
+    "technical_requirements": [
+      "PostgreSQL",
+      "Alembic migrations",
+      "Async DB driver (asyncpg)"
+    ],
+    "dependencies": [
+      "TASK-021"
+    ],
+    "security_considerations": [
+      "Stocare credențiale: salvați doar blob criptat sau referință; nu salvați plaintext",
+      "Audit log trebuie append-only; interziceți UPDATE/DELETE logic (soft delete doar unde justificat)"
+    ],
+    "edge_cases": [
+      "Onboarding concurent cu același token: tranzacții cu SELECT ... FOR UPDATE și consumed_at atomic",
+      "Rotație de credențiale: păstrați versiunile vechi pentru audit, dar marcați active=false"
+    ],
+    "acceptance_criteria": [
+      "Migrațiile creează toate tabelele și rulează pe un DB gol",
+      "Constrângerile de unicitate previn dubluri",
+      "Există teste de concurență pentru consumarea token-ului"
+    ]
+  },
+  {
+    "id": "TASK-023",
+    "title": "Discovery Service: autentificare admin (OIDC/JWT), RBAC și sesiuni pentru UI",
+    "component": "discovery-service",
+    "description": "Implementați autentificarea și autorizarea pentru operatorii umani (UI) și pentru API-urile administrative. Includeți RBAC, MFA-ready, audit identity și session hardening.",
+    "objectives": [
+      "Acces controlat la operații sensibile (emitere/revocare, enrollment)",
+      "Trasabilitate: fiecare acțiune admin este audit-logged cu actor",
+      "Separare roluri: viewer, operator, security-admin, chain-admin"
+    ],
+    "implementation_details": "1) Alegeți mecanism: OIDC (recommended) sau JWT intern; fixați OIDC pentru production și JWT dev fallback. 2) Implementați middleware care validează tokens și extrage claims (sub, roles). 3) Implementați RBAC mapping roles→permissions și aplicați la router level (dependency injection). 4) Implementați audit logging: fiecare endpoint admin scrie audit_event cu actor, action, target, diff summary. 5) Implementați protecții UI: CSRF pentru endpoints mutate (dacă folosiți cookies), rate limiting pentru login, session timeout.",
+    "technical_requirements": [
+      "OAuth2/OIDC (provider extern)",
+      "RBAC intern",
+      "OWASP ASVS ca ghid pentru auth/session citeturn4search3"
+    ],
+    "dependencies": [
+      "TASK-021",
+      "TASK-022",
+      "TASK-002"
+    ],
+    "security_considerations": [
+      "Privilege escalation: default deny; validați roluri numai din issuer OIDC de încredere",
+      "Token leakage: scurtați TTL și activați refresh token doar pentru UI, nu pentru servicii"
+    ],
+    "edge_cases": [
+      "OIDC downtime: modul break-glass (un cont local emergency) cu audit strict și rotație periodică",
+      "Schimbare roluri în IdP: aplicați la următorul request (nu cache îndelungat)"
+    ],
+    "acceptance_criteria": [
+      "UI poate autentifica și obține roluri; endpoints admin sunt protejate",
+      "RBAC este testat (permit/deny) per rol",
+      "Audit log capturează actorul și acțiunea pentru toate mutațiile"
+    ]
+  },
+  {
+    "id": "TASK-024",
+    "title": "Discovery Service API: înregistrare aplicații și servicii (service registry core)",
+    "component": "discovery-service",
+    "description": "Implementați API-ul pentru înregistrarea aplicațiilor și serviciilor în Discovery, inclusiv service_id, env, metadata, și asocierea lor cu producer/consumer sentinels.",
+    "objectives": [
+      "API determinist pentru register/update/deactivate service",
+      "Validări stricte (namespace, env, owner) și audit",
+      "Bază pentru service discovery (consumer) și pentru binding on-chain (ServiceRegistry)"
+    ],
+    "implementation_details": "1) Endpoints: POST /api/v1/apps, GET /api/v1/apps, POST /api/v1/services, PATCH /api/v1/services/{id}, GET /api/v1/services, POST /api/v1/services/{id}/deactivate. 2) Definește modele Pydantic și validări (env ∈ {dev,test,prod}). 3) Persistă în DB (tabele apps/services) și scrie audit_event. 4) Integrare opțională cu ServiceRegistry on-chain: la register service, calculați serviceKey și publicați didHash/owner în contract (sau lăsați pentru TASK-031).",
+    "technical_requirements": [
+      "FastAPI + Pydantic",
+      "PostgreSQL schema (TASK-022)",
+      "Optional: blockchain client (TASK-020)"
+    ],
+    "dependencies": [
+      "TASK-023"
+    ],
+    "security_considerations": [
+      "Malicious service registration: restricționați cine poate crea services și impuneți approval workflow pentru prod",
+      "Input injection în metadata (URLs): validați și sanitizați; interziceți scheme periculoase"
+    ],
+    "edge_cases": [
+      "Service rename vs service_id: service_id este immutable; allow doar display_name",
+      "Dezactivare service cu sentinels active: marcați și inițiați decommission"
+    ],
+    "acceptance_criteria": [
+      "Serviciile pot fi create/listate/actualizate conform RBAC",
+      "Audit log conține toate mutațiile",
+      "Validările resping env invalid și duplicate service_id+env"
+    ]
+  },
+  {
+    "id": "TASK-025",
+    "title": "Discovery Service: emitere enrollment tokens și workflow de aprobare pentru onboarding Sentinels",
+    "component": "discovery-service",
+    "description": "Implementați workflow-ul prin care un admin generează un enrollment token (one-time) pentru un sentinel nou sau pentru re-onboarding, cu binding pe service/rol/env și expirare scurtă.",
+    "objectives": [
+      "Token one-time, exp scurt, consumare atomică",
+      "Approval gates pentru medii sensibile (prod)",
+      "Audit complet al emiterii și consumării token-urilor"
+    ],
+    "implementation_details": "1) Endpoint: POST /api/v1/sentinels/enrollments pentru a crea token; payload include service_id, role, env, expires_in, optional constraints. 2) Generați JWT semnat cu cheie dedicată (SecretStorage), includeți jti și claims. 3) Persistă entry în DB (enrollment_tokens) cu status=PENDING; pentru prod set required_approval=true. 4) Endpoint: POST /api/v1/sentinels/enrollments/{id}/approve (RBAC security-admin) schimbă status=APPROVED și activează token-ul. 5) Returnați token-ul doar o dată (la creare) sau prin „download once” cu audit; stocați doar hash(token) în DB pentru verificare, nu token plaintext.",
+    "technical_requirements": [
+      "JWT semnat (JOSE)",
+      "DB locking pentru one-time consumption",
+      "Audit logging (TASK-034)"
+    ],
+    "dependencies": [
+      "TASK-005",
+      "TASK-023",
+      "TASK-024"
+    ],
+    "security_considerations": [
+      "Token leakage: evitați expunere în UI logs; token display doar o dată și mascat parțial",
+      "Brute-force token: folosiți semnătură + entropie mare + rate limiting pe endpoint-ul de onboarding"
+    ],
+    "edge_cases": [
+      "Admin creează token și îl pierde: reemiteți token nou și revocați entry-ul vechi",
+      "Token aprobat dar expiră înainte de onboarding: onboarding trebuie să respingă și să ceară token nou"
+    ],
+    "acceptance_criteria": [
+      "Token-urile sunt create cu jti unic și exp scurt, și sunt audit-logged",
+      "Token-urile nu pot fi re-folosite (test concurent)",
+      "Approval este necesar în prod și enforce-uit de RBAC"
+    ]
+  },
+  {
+    "id": "TASK-026",
+    "title": "Discovery Service API: endpoint de onboarding Sentinel cu mTLS + DID proof-of-possession",
+    "component": "discovery-service",
+    "description": "Implementați endpoint-ul de onboarding care validează enrollment token, execută challenge-response PoP pentru DID, și înregistrează sentinel-ul (rol/env/service binding).",
+    "objectives": [
+      "Handshake sigur și rezistent la replay/spoofing",
+      "Înregistrare idempotentă (retries)",
+      "Emiterea config + credențiale inițiale"
+    ],
+    "implementation_details": "1) Endpoint: POST /api/v1/sentinels/onboard. 2) Flux: (a) validați JWT enrollment token (semnătură/exp/jti), (b) verificați token hash în DB și status=APPROVED, (c) generați challenge nonce și returnați dacă lipsesc proof fields; sau acceptați request cu proof inițial. 3) Verificați PoP: semnătura peste nonce + token_id + did; validați did_document derivat (did:key) sau rezolvat (dacă suport). 4) Consumați token (consumed_at) atomic. 5) Creați/actualizați sentinel record (did, role, env, service_id, created_at, last_seen). 6) Returnați un bundle: sentinel_id, config_version, discovery endpoints, chain contract addresses, trust roots, și credențiale inițiale (emise în TASK-028).",
+    "technical_requirements": [
+      "mTLS pentru canal securizat",
+      "JWT validation",
+      "DID PoP (semnătură) aliniat cu DID Core concept citeturn0search0"
+    ],
+    "dependencies": [
+      "TASK-022",
+      "TASK-025",
+      "TASK-011"
+    ],
+    "security_considerations": [
+      "Replay PoP: nonce trebuie să fie one-time și exp scurt; păstrați nonce în DB/Redis cu TTL",
+      "Onboarding flood: rate limiting per IP/token_id și circuit breaker"
+    ],
+    "edge_cases": [
+      "Dublu onboarding pentru același DID/rol/env: tratați ca idempotent și returnați config curent",
+      "Nonce emis, dar client trimite proof după expirare: răspundeți cu challenge nou"
+    ],
+    "acceptance_criteria": [
+      "Onboarding respinge token invalid/expirat/consumat",
+      "Onboarding verifică PoP și refuză semnături invalide",
+      "Onboarding este idempotent pentru retries (fără duplicate în DB)"
+    ]
+  },
+  {
+    "id": "TASK-027",
+    "title": "Discovery Service: generarea și semnarea „config bundle” pentru Sentinels (versioned, rollbackable)",
+    "component": "discovery-service",
+    "description": "Implementați mecanismul prin care Discovery produce un config bundle versionat pentru fiecare sentinel: endpoints, policy defaults, trust anchors, rotație, parametri Δ, și setări de observabilitate.",
+    "objectives": [
+      "Config reproducibil și versionat per sentinel (role/env/service)",
+      "Semnare config pentru integritate",
+      "Rollback controlat la versiunea anterioară"
+    ],
+    "implementation_details": "1) Definește structura bundle (JSON): bundle_version, issued_at, sentinel_did, role, env, service_id, discovery_url, chain={network, rpc_urls, contract_addresses}, policy_defaults, revocation={delta, mode}, observability={otlp_endpoint, sampling}. 2) Semnați bundle ca JWS (sau includeți un signature block) folosind cheie Discovery dedicată. 3) Persistă bundle metadata în DB (config_bundles) și păstrați ultimele N versiuni. 4) Endpoint: GET /api/v1/sentinels/{id}/config (autentificat) returnează latest; opțional include ETag și If-None-Match. 5) Implementați rollback endpoint admin: POST /api/v1/sentinels/{id}/config/rollback?to_version=X (audit strict).",
+    "technical_requirements": [
+      "JOSE/JWS (semnare) conform profile ales",
+      "DB schema pentru bundle history",
+      "ETag caching"
+    ],
+    "dependencies": [
+      "TASK-026",
+      "TASK-006",
+      "TASK-007"
+    ],
+    "security_considerations": [
+      "Tampering în tranzit: semnătura previne; Sentinel trebuie să valideze semnătura înainte de aplicare",
+      "Rollback abuzat: protejați cu RBAC și audit; limitați numai security-admin"
+    ],
+    "edge_cases": [
+      "Sentinel offline și sare peste versiuni: aplicați doar latest (sau incremental dacă cerut) și logați",
+      "Bundle semnat cu cheie rotită: includeți kid și mecanism de key rollover"
+    ],
+    "acceptance_criteria": [
+      "Bundle are versioning și este semnat; Sentinel poate verifica semnătura",
+      "Există rollback controlat și auditat",
+      "Client caching (ETag) funcționează și reduce trafic"
+    ]
+  },
+  {
+    "id": "TASK-028",
+    "title": "Discovery Service: modul de emitere credențiale (JWT-VC/JWT-VP) conform VC DM 2.0 și VC-JOSE-COSE",
+    "component": "discovery-service",
+    "description": "Implementați emiterea credențialelor definite în TASK-004, folosind VC Data Model v2.0 și mecanismele JOSE/JWS definite în VC-JOSE-COSE. citeturn0search1turn2search0",
+    "objectives": [
+      "Emiterea deterministă pentru SentinelIdentityCredential, ServiceBindingCredential, AccessGrantCredential",
+      "Chei issuer gestionate prin SecretStorage și rotație planificată",
+      "Semnare și verificare internă (self-check) înainte de distribuție"
+    ],
+    "implementation_details": "1) Implementați un „CredentialIssuerService” cu metode: issue_sentinel_identity(did,...), issue_service_binding(...), issue_access_grant(...), reissue_on_rotation(...). 2) Reprezentare: JWT-VC cu claims standard (iss/sub/nbf/exp/jti) și custom (env/aud/scope/status). 3) Semnare: folosiți JOSE/JWS conform VC-JOSE-COSE; includeți kid și algoritm stabil (din TASK-003). citeturn2search0 4) Includeți status reference pentru Bitstring Status List. citeturn0search2 5) La emitere, rulați verificare internă: (a) parse, (b) verify signature, (c) validate schema, (d) ensure issuer este în IssuerRegistry (dacă validați self). 6) Persistă metadata + ciphertext (nu plaintext) în DB.",
+    "technical_requirements": [
+      "W3C VC Data Model v2.0 citeturn0search1",
+      "W3C VC-JOSE-COSE citeturn2search0",
+      "Bitstring Status List v1.0 citeturn0search2",
+      "Secret storage (TASK-011)"
+    ],
+    "dependencies": [
+      "TASK-004",
+      "TASK-022",
+      "TASK-014",
+      "TASK-015",
+      "TASK-011"
+    ],
+    "security_considerations": [
+      "Issuer key compromise: rotație + dezactivare issuer în IssuerRegistry + reissue pentru credențiale critice",
+      "Credential leakage: stocare criptată + acces RBAC strict + redactare logs"
+    ],
+    "edge_cases": [
+      "VC cu exp prea lung (ani): impuneți max TTL per tip de credential",
+      "Issuer disabled pe chain după emitere: Producer trebuie să respingă imediat (nu depinde de Discovery)"
+    ],
+    "acceptance_criteria": [
+      "Discovery poate emite cele 3 tipuri de VC și poate valida semnătura lor",
+      "Cheile issuer sunt citite din SecretStorage și kid este inclus",
+      "VC-urile includ status reference și env/aud binding"
+    ]
+  },
+  {
+    "id": "TASK-029",
+    "title": "Discovery Service: distribuția credențialelor și rotație (pull model) pentru Sentinels",
+    "component": "discovery-service",
+    "description": "Implementați endpoint-uri și logică pentru ca Sentinels să descarce credențiale, să primească actualizări și să gestioneze rotația/revocarea fără downtime.",
+    "objectives": [
+      "Distribuție sigură și incrementală a credențialelor",
+      "Rotație suportată (noi VC + revocare vechi) cu grace period",
+      "Minimizarea expunerii (doar credențiale necesare unui sentinel)"
+    ],
+    "implementation_details": "1) Endpoint: GET /api/v1/sentinels/{id}/credentials?since=timestamp returnează lista de credențiale active + metadata (ids, exp, statusListId). 2) Autentificare: mTLS + token sentinel (emis la onboarding) sau semnătură DID PoP periodică. 3) Implementați ETag/If-Modified-Since pentru a reduce trafic. 4) Pentru rotație: când un VC e re-emis, marcați vechiul ca „deprecated_until=ts” și includeți ambele în feed până la ts; sentinels trebuie să accepte ambele pentru verificare în acest interval. 5) Nu livrați credențiale care nu aparțin sentinel-ului (filtrați după did/role/service/env).",
+    "technical_requirements": [
+      "mTLS",
+      "HTTP caching (ETag)",
+      "DB schema credențiale (TASK-022)"
+    ],
+    "dependencies": [
+      "TASK-028",
+      "TASK-027"
+    ],
+    "security_considerations": [
+      "Exfiltrare credențiale prin endpoint: enforce strict auth + scoping + audit",
+      "Downgrade la credențiale vechi: includeți versioning și semnați răspunsul sau folosiți TLS pinning în sentinel"
+    ],
+    "edge_cases": [
+      "Sentinel rămâne offline peste expirare: la revenire primește un set complet și trebuie să refuze dacă nu mai are VC valid",
+      "DB inconsistență la rotație: folosiți tranzacții pentru schimbarea stării credențialelor"
+    ],
+    "acceptance_criteria": [
+      "Sentinel poate sincroniza credențiale incremental și complet",
+      "Rotația oferă grace period și este testată end-to-end",
+      "Audit log înregistrează accesările la feed-ul de credențiale"
+    ]
+  },
+  {
+    "id": "TASK-030",
+    "title": "Discovery Service: publicarea Bitstring Status Lists și management revocări",
+    "component": "discovery-service",
+    "description": "Implementați generarea, actualizarea și publish-ul status lists pentru credențiale, incluzând API admin pentru revocare/suspendare și job-uri periodice.",
+    "objectives": [
+      "Revocare operabilă (API + UI) cu latente mici",
+      "Status list publish performant și cache-friendly",
+      "Audit complet pentru revocări (cine/când/de ce)"
+    ],
+    "implementation_details": "1) Modelați statusList per (issuer, env, credentialType) sau per „bucket” (configurabil). 2) Implementați storage: statusListCredential ca obiect (ex: în DB + optional object storage) și un endpoint public read-only /status/{statusListId}. 3) Admin endpoint: POST /api/v1/credentials/{credentialId}/revoke (reason, severity). 4) La revocare: setați bit-ul în bitstring, incrementați version, semnați noul statusListCredential, persistați și emiteți audit event. 5) Introduceți job de publish periodic (ex: la 1 min) care regenerează doar dacă s-a schimbat. 6) Pregătiți integrarea de ancorare on-chain în TASK-031.",
+    "technical_requirements": [
+      "Bitstring Status List v1.0 citeturn0search2",
+      "Job runner (ex: Celery/Arq) sau background tasks",
+      "HTTP caching headers"
+    ],
+    "dependencies": [
+      "TASK-007",
+      "TASK-028",
+      "TASK-022"
+    ],
+    "security_considerations": [
+      "Revocare neautorizată: endpoint admin protejat RBAC + audit; folosiți dual control în prod (two-person rule)",
+      "Status list poisoning: semnați status list și ancorați hash on-chain; sentinel verifică"
+    ],
+    "edge_cases": [
+      "Bitstring crește (prea multe credențiale): implementați rollover către status list nou și păstrați vechiul read-only",
+      "Revocare repetată a aceluiași credential: idempotent și logați"
+    ],
+    "acceptance_criteria": [
+      "Revocarea schimbă status list și este vizibilă în endpoint public",
+      "Există audit event pentru fiecare revocare",
+      "Status list este semnat și versionat"
+    ]
+  },
+  {
+    "id": "TASK-031",
+    "title": "Discovery Service: integrare completă cu blockchain (publish anchors, verificare registries, chain indexer UI data)",
+    "component": "discovery-service",
+    "description": "Conectați Discovery la contractele on-chain: configurează și menține IssuerRegistry/PolicyRegistry/ServiceRegistry, publică status anchors, consumă evenimente prin indexer și le expune pentru UI/admin.",
+    "objectives": [
+      "Discovery poate publica status anchors și (opțional) service registry updates",
+      "Discovery poate verifica rapid starea on-chain pentru operații critice",
+      "UI poate afișa starea și istoricul chain events"
+    ],
+    "implementation_details": "1) Integrați /libs/chain (TASK-020) în Discovery. 2) La boot: încărcați addresses/ABI și validați că contractele răspund (health check). 3) Implementați un modul „ChainPolicyCache” care citește global params + issuer statuses și le cache-uiește cu TTL. 4) Hook în revocation publish: după actualizarea status list (TASK-030), publicați rootHash+updatedAt în StatusRegistry. 5) Implementați endpoints admin: GET /api/v1/chain/status (network, last_block, lag), GET /api/v1/chain/events?since=... 6) Dacă ServiceRegistry e activ: la register service, publicați binding-ul on-chain și păstrați tx receipt.",
+    "technical_requirements": [
+      "web3.py async client citeturn3search11",
+      "Contract registries din TASK-014..017",
+      "Indexer logic din TASK-020"
+    ],
+    "dependencies": [
+      "TASK-020",
+      "TASK-024",
+      "TASK-030"
+    ],
+    "security_considerations": [
+      "Tx signing key compromise: minimizați permisiunile și separați cheile per contract/rol",
+      "RPC outage: implementați circuit breaker și degrade UI; nu blocați revocarea locală, dar marcați „anchor pending”"
+    ],
+    "edge_cases": [
+      "Tx dropped/replaced: implementați resubmit logic și idempotency keys",
+      "Chain reorg invalidează events: indexer-ul trebuie să reproceseze finality window și să corecteze DB"
+    ],
+    "acceptance_criteria": [
+      "Status anchors sunt publicate pe chain local și vizibile prin query",
+      "Discovery raportează health/lag pentru indexer",
+      "UI poate lista chain events din DB"
+    ]
+  },
+  {
+    "id": "TASK-032",
+    "title": "Discovery Service: service discovery API și „signed service descriptor” pattern",
+    "component": "discovery-service",
+    "description": "Implementați registry-ul de descoperire pentru consumatori, în care endpoint-urile volatile rămân off-chain, dar descriptorul este semnat de Producer Sentinel pentru integritate, iar (opțional) hash-ul e ancorat on-chain.",
+    "objectives": [
+      "Consumer Sentinel poate rezolva endpoint-uri fără a face trust decision în Discovery",
+      "Descriptor semnat previne tampering (dacă Discovery e compromis)",
+      "Compatibilitate cu multi-instance (multiple endpoints per service)"
+    ],
+    "implementation_details": "1) Definește ServiceDescriptor: service_id, env, producer_service_did, endpoints[{url, protocol, weight, instance_id}], issued_at, expires_at. 2) Producer Sentinel semnează descriptorul (JWS) și îl publică la Discovery: POST /api/v1/services/{id}/descriptor. 3) Discovery stochează descriptorul și îl livrează consumerilor: GET /api/v1/registry/resolve?service_id=&env=. 4) Consumer verifică semnătura producerului și, dacă ServiceRegistry e activ, verifică că producer_service_did corespunde binding-ului on-chain (hash match). 5) Impuneți TTL scurt pe descriptor (ex: 60s-5m) și rotație continuă; Discovery păstrează ultimul valid.",
+    "technical_requirements": [
+      "JOSE/JWS",
+      "Optional: ServiceRegistry on-chain (TASK-017)",
+      "HTTP caching (stale-while-revalidate)"
+    ],
+    "dependencies": [
+      "TASK-006",
+      "TASK-017",
+      "TASK-024"
+    ],
+    "security_considerations": [
+      "Discovery compromise: semnătura producerului previne injectarea de endpoint-uri fără cheie producer",
+      "Descriptor replay: include issued_at/expires_at și respinge dacă expirat; verificați monotonic update"
+    ],
+    "edge_cases": [
+      "Producer are multiple instanțe + endpoint-uri; definește selection algorithm (round-robin/weighted)",
+      "Descriptor expirat și producer offline: consumer poate folosi ultimul descriptor doar dacă politica permite (de ex: max_stale)"
+    ],
+    "acceptance_criteria": [
+      "Producer poate publica descriptor semnat; consumer îl poate verifica",
+      "Resolve endpoint returnează doar descriptor valid (ne-expirat)",
+      "Multi-instance endpoints sunt suportate și testate"
+    ]
+  },
+  {
+    "id": "TASK-033",
+    "title": "Discovery Service: sentinel lifecycle manager (heartbeat, decommission, rejoin/migration)",
+    "component": "discovery-service",
+    "description": "Implementați managementul de viață pentru sentinels: health registration, heartbeat, status (active/degraded/offline), decommission, și rejoin după migrare.",
+    "objectives": [
+      "Vizibilitate operabilă asupra sentinels și instanțelor",
+      "Decommission sigur (revocare credențiale/invalidare descriptoare)",
+      "Rejoin idempotent cu același DID"
+    ],
+    "implementation_details": "1) Endpoint: POST /api/v1/sentinels/heartbeat (autentificat) cu instance_id, version, health metrics summary. 2) Discovery actualizează last_seen și calculează status (active dacă last_seen < threshold). 3) Decommission endpoint admin: POST /api/v1/sentinels/{id}/decommission: (a) marchează sentinel inactive, (b) revocă credențiale relevante (TASK-030), (c) invalidează service descriptor (TASK-032). 4) Rejoin: pentru migrare, sentinel reapelează onboard sau un endpoint dedicat /rejoin cu PoP și eventual migration ticket (TASK-005). 5) Păstrați history pentru audit.",
+    "technical_requirements": [
+      "DB schema sentinels + instances",
+      "Auth sentinel (mTLS + token/PoP)"
+    ],
+    "dependencies": [
+      "TASK-026",
+      "TASK-030",
+      "TASK-032"
+    ],
+    "security_considerations": [
+      "Heartbeats spoofed: autentificați strict, nu acceptați fără mTLS + identity",
+      "Decommission incomplete: asigurați tranzacție logică (nu trebuie să rămână service descriptor activ după decommission)"
+    ],
+    "edge_cases": [
+      "Network partition: sentinel e activ dar Discovery nu vede heartbeat; UI trebuie să arate „unknown” vs „dead” cu praguri",
+      "Multiple instanțe: heartbeat per instance; sentinel status active dacă există cel puțin 1 instance healthy"
+    ],
+    "acceptance_criteria": [
+      "UI/API poate lista status sentinel și instances în timp real (cu praguri)",
+      "Decommission revocă și invalidează descriptorul",
+      "Rejoin funcționează fără a crea duplicate (idempotent)"
+    ]
+  },
+  {
+    "id": "TASK-034",
+    "title": "Discovery Service: audit logging append-only + export pentru investigații",
+    "component": "security",
+    "description": "Implementați un subsistem de audit logging pentru toate acțiunile administrative și operațiile critice (issue/revoke, enroll/approve, chain publishes). Log-urile trebuie să fie append-only, cu integritate verificabilă și retenție configurabilă.",
+    "objectives": [
+      "Trasabilitate completă a acțiunilor admin și a schimbărilor de trust",
+      "Integritate (tamper-evidence) pentru audit events",
+      "Export facil (JSONL) pentru SIEM"
+    ],
+    "implementation_details": "1) Definiți model audit_event: event_id, ts, actor_type(admin/sentinel/system), actor_id, action, target_type, target_id, summary, diff_hash, ip, user_agent. 2) Append-only: interziceți UPDATE/DELETE la nivel aplicație; folosiți soft-delete doar pentru date non-audit. 3) Tamper-evidence: mențineți un hash chain (prev_hash + event_hash) și stocați periodic checkpoint hash într-o locație separată (opțional ancorare on-chain ca descriptorHash). 4) Export endpoints: GET /api/v1/audit/events?from=&to=&cursor=... cu paging și semnare opțională. 5) Integrați audit în toate endpoint-urile admin (TASK-023..031).",
+    "technical_requirements": [
+      "Hash chaining (SHA-256)",
+      "DB append-only enforcement (aplicație + opțional DB trigger)"
+    ],
+    "dependencies": [
+      "TASK-023",
+      "TASK-022",
+      "TASK-020"
+    ],
+    "security_considerations": [
+      "Audit log poate conține date sensibile: aplicați redactare și separare de access roles (audit-viewer)",
+      "Risc de ștergere DB: implementați backup/DR și export periodic"
+    ],
+    "edge_cases": [
+      "Volum mare de evenimente: implementați partitioning și indexing pe ts/actor/action",
+      "Clock skew: folosiți server-side timestamps în UTC"
+    ],
+    "acceptance_criteria": [
+      "Toate acțiunile critice produc audit events",
+      "Audit events nu pot fi modificate prin API",
+      "Export funcționează paginat și include hash-chain verificabil"
+    ]
+  },
+  {
+    "id": "TASK-035",
+    "title": "Discovery Service: hardening API (rate limiting, request size limits, secure headers, CORS) și protecții anti-abuz",
+    "component": "security",
+    "description": "Introduceți protecții operaționale pentru a reduce DoS și abuz: rate limiting, throttling pe onboarding, limitări de payload, validări stricte și secure headers.",
+    "objectives": [
+      "Reduceți suprafața de DoS pe endpoints critice (onboard, revoke, publish)",
+      "Impuneți limite clare pentru payload și concurrency",
+      "Standardizați secure headers pentru UI și API"
+    ],
+    "implementation_details": "1) Introduceți rate limiter (Redis-based) pe: /sentinels/onboard, /credentials/revoke, auth endpoints. 2) Impuneți max request body (ex: 2MB) și max header sizes; respingeți oversize. 3) Secure headers: HSTS (pentru UI), X-Content-Type-Options, Referrer-Policy, Content-Security-Policy pentru UI. 4) CORS: allow-list strict pentru origin UI; disable wildcard. 5) Implementați idempotency keys pentru endpoints care mută state (revoke/publish) pentru a preveni dublări la retries.",
+    "technical_requirements": [
+      "Redis (rate limiting)",
+      "FastAPI middleware",
+      "Secure headers policy"
+    ],
+    "dependencies": [
+      "TASK-021",
+      "TASK-022"
+    ],
+    "security_considerations": [
+      "Rate limiting prea strict poate afecta availability în incident; configurați per env și măsurați",
+      "CSP greșit poate rupe UI; testați incremental"
+    ],
+    "edge_cases": [
+      "Burst de onboarding multi-instance: configurați bucket separat per token_id și per IP",
+      "Proxy/load balancer schimbă IP: folosiți X-Forwarded-For doar dacă proxy e trusted"
+    ],
+    "acceptance_criteria": [
+      "Rate limits sunt aplicate și testate pe endpoints critice",
+      "Request size limits sunt enforce-uite",
+      "CORS și secure headers sunt validate prin teste automatizate"
+    ]
+  },
+  {
+    "id": "TASK-036",
+    "title": "Discovery Service: instrumentare OpenTelemetry + metrici Prometheus + health endpoints",
+    "component": "discovery-service",
+    "description": "Instrumentați Discovery cu tracing și metrici standard, exportate prin OpenTelemetry și Prometheus. Folosiți instrumentarea recomandată pentru FastAPI. citeturn4search0turn5search7",
+    "objectives": [
+      "Traces corelate între Discovery și Sentinels",
+      "Metrici pentru performanță, rate limiting, onboarding success/fail, revocation publish",
+      "Health endpoints exacte (readiness/liveness)"
+    ],
+    "implementation_details": "1) Integrați opentelemetry-instrumentation-fastapi și export OTLP către Collector. citeturn4search0turn5search7 2) Adăugați manual spans pentru operații critice: issue VC, revoke, publishStatusAnchor, onboard. 3) Metrici Prometheus: request_count, request_latency_ms histograms, onboarding_failures_by_reason, revocation_updates_total, chain_publish_latency, chain_indexer_lag. 4) Expuneți /health/live (proc alive), /health/ready (DB ok + chain ok optional), /metrics. 5) Redactați label-uri pentru a evita cardinalitate mare (nu includeți did în labels).",
+    "technical_requirements": [
+      "OpenTelemetry FastAPI instrumentation citeturn4search0",
+      "OpenTelemetry Collector citeturn5search7",
+      "Prometheus exposition guidelines citeturn4search1"
+    ],
+    "dependencies": [
+      "TASK-012",
+      "TASK-021"
+    ],
+    "security_considerations": [
+      "Exfiltrare de date prin traces/logs: nu includeți payload-uri (VC/VP) în spans",
+      "Endpoint /metrics poate expune info; protejați în rețea (ex: doar cluster-internal)"
+    ],
+    "edge_cases": [
+      "Collector down: export trebuie să fie non-blocking; aplicați batch + timeout",
+      "Exces de spans: configurați sampling per env"
+    ],
+    "acceptance_criteria": [
+      "Discovery produce traces și poate exporta OTLP către un Collector",
+      "Metricile sunt expuse și scrape-uibile de Prometheus",
+      "Health endpoints reflectă corect DB availability"
+    ]
+  },
+  {
+    "id": "TASK-037",
+    "title": "Sentinel core runtime: FastAPI gateway cu mod Producer/Consumer și reverse proxy async",
+    "component": "sentinel",
+    "description": "Implementați serviciul Sentinel (un singur binar/imagine) configurabil ca Producer sau Consumer. Includeți reverse proxy pentru HTTP către serviciile locale și client pentru outbound requests.",
+    "objectives": [
+      "Runtime comun pentru Producer și Consumer pentru a reduce divergența",
+      "Async proxy cu suport pentru streaming și timeouts",
+      "Endpoint-uri interne pentru health, config, și UI minimal"
+    ],
+    "implementation_details": "1) Creați FastAPI app cu două grupuri de rute: /inbound (producer) și /outbound (consumer). 2) Implementați reverse proxy către serviciu local (producer): forward method/path/query/headers, streaming body/response, timeouts, max body size. 3) Implementați client outbound (consumer): HTTPX async, retries configurabile, circuit breaker. 4) Introduceți structura internă: security (proof verify), policy, wallet, ds_client, chain_client, logging. 5) Includeți /health/live, /health/ready, /metrics, /ui.",
+    "technical_requirements": [
+      "FastAPI",
+      "HTTPX (async)",
+      "Uvicorn/Hypercorn"
+    ],
+    "dependencies": [
+      "TASK-009",
+      "TASK-006",
+      "TASK-012"
+    ],
+    "security_considerations": [
+      "Header smuggling: validați și filtrați hop-by-hop headers; impuneți allow/deny lists",
+      "SSRF (consumer): validați că outbound target provine din Discovery registry, nu din input client"
+    ],
+    "edge_cases": [
+      "Streaming responses: asigurați backpressure și timeouts pentru a evita mem leak",
+      "Large payload: impuneți limită și returnați 413"
+    ],
+    "acceptance_criteria": [
+      "Sentinel poate forward-a request către un backend local și poate returna răspunsul",
+      "Sentinel poate trimite outbound request prin HTTPX async",
+      "Health endpoints și /metrics sunt disponibile"
+    ]
+  },
+  {
+    "id": "TASK-038",
+    "title": "Sentinel: storage criptat pentru chei/cred și integrare cu SecretStorage (local + Vault)",
+    "component": "sentinel",
+    "description": "Implementați persistența sigură a cheilor DID și a credențialelor la Sentinel, folosind interfața SecretStorage. Scop: sentinel stateless / semi-stateless cu suport migrare și multi-instance.",
+    "objectives": [
+      "Chei și credențiale persistente fără plaintext",
+      "Suport pentru backend partajat (Vault) pentru multi-instance",
+      "Cache local controlat pentru pornire rapidă"
+    ],
+    "implementation_details": "1) Integrați SecretStorage interface din TASK-011 în Sentinel. 2) Stocați: did_private_key (sau reference la Vault transit), issuer trust materials, cached credentials, cached status lists. 3) Implementați file perms stricte pentru modul local; validați la startup dacă perms sunt prea relaxate. 4) Pentru Vault: implementați auto-renew token și backoff la erori; permiteți „read-only mode” dacă Vault e down (configurabil). 5) Implementați „wallet snapshot” export criptat pentru disaster recovery (nu pentru flux normal).",
+    "technical_requirements": [
+      "SecretStorage (TASK-011)",
+      "AES-GCM encryption (cryptography)"
+    ],
+    "dependencies": [
+      "TASK-011",
+      "TASK-037"
+    ],
+    "security_considerations": [
+      "Chei în memorie: limitați lifetime și evitați logs; folosiți zeroization unde posibil",
+      "Vault policy misconfig: testați că sentinel poate citi doar secretele lui (namespacing per service/role/env)"
+    ],
+    "edge_cases": [
+      "Vault down la startup: decideți dacă sentinel pornește fail-closed sau degrade; documentați",
+      "Corupere cache local: rehydrate din Discovery și Vault; validați checksum"
+    ],
+    "acceptance_criteria": [
+      "Sentinel poate porni în mod local și în mod Vault fără schimbări de cod",
+      "Cheile/credențialele nu sunt scrise plaintext",
+      "Există teste care verifică permisiuni fișiere și decriptare"
+    ]
+  },
+  {
+    "id": "TASK-039",
+    "title": "Sentinel: lifecycle pentru DID și chei (generate, load, rotate, backup/restore) cu PoP",
+    "component": "sentinel",
+    "description": "Implementați modulul care gestionează identitatea Sentinel: generare DID, încărcare chei, proof-of-possession pentru onboarding, și rotație controlată de chei.",
+    "objectives": [
+      "DID stabil per (service_id, role, env) conform modelului de multi-instance",
+      "PoP semnare challenge pentru onboarding/rejoin",
+      "Rotație chei fără downtime în cluster"
+    ],
+    "implementation_details": "1) Implementați comandă/endpoint intern: sentinelctl init --service-id --role --env: generează cheie (sau creează key în Vault) și derivă DID. 2) La runtime: încărcați DID/cheie din SecretStorage; validați integritatea (ex: key format). 3) Implementați PoP: semnați challenge nonce și returnați signature + public key. 4) Rotație: sentinelctl rotate-key: creează key nouă, actualizează storage cu versioning, cere Discovery reissue credentials; sentinel păstrează vechea cheie în memorie pentru grace window (config). 5) Backup/restore (dev): export criptat al cheii și wallet snapshot, cu passphrase și scrypt.",
+    "technical_requirements": [
+      "JOSE/JWS signing backend",
+      "SecretStorage versioning",
+      "CLI tooling (click/typer)"
+    ],
+    "dependencies": [
+      "TASK-038",
+      "TASK-005"
+    ],
+    "security_considerations": [
+      "Rotație cheie fără revocare veche: poate permite utilizare continuă; Discovery trebuie să revocheze vechiul binding după grace window",
+      "Backup export: risc de exfiltrare; folosiți criptare puternică și avertizați clar că e doar pentru break-glass"
+    ],
+    "edge_cases": [
+      "Două instanțe rotesc cheia simultan: impuneți lock în Vault/DB (leader election sau compare-and-swap pe version)",
+      "Cheie nouă introdusă dar Discovery încă nu a reemis credențiale: sentinel continuă cu vechea cheie până la confirmare"
+    ],
+    "acceptance_criteria": [
+      "Sentinel poate genera și persista DID/chei, și poate semna PoP challenge",
+      "Rotația produce versiuni și suportă grace window",
+      "Backup/restore produce un fișier criptat și restabilește DID-ul identic"
+    ]
+  },
+  {
+    "id": "TASK-040",
+    "title": "Sentinel: client Discovery (mTLS, bootstrap, sync config/credentials, backoff și idempotency)",
+    "component": "sentinel",
+    "description": "Implementați modulul care comunică cu Discovery: onboarding/rejoin, polling config bundle, polling credentials, publish heartbeat, publish service descriptors (producer).",
+    "objectives": [
+      "Integrare robustă cu Discovery fără blocarea request path",
+      "Sync determinist și idempotent cu ETag/versions",
+      "mTLS + autentificare sentinel (token/PoP) pentru toate call-urile"
+    ],
+    "implementation_details": "1) Folosiți HTTPX async cu mTLS (client cert) și timeouts. 2) Implementați onboarding/rejoin conform TASK-026: trimite PoP signature și suportă challenge workflow. 3) Config sync: GET /sentinels/{id}/config cu ETag; aplicați doar dacă semnătura e validă. 4) Credentials sync: GET /sentinels/{id}/credentials?since=...; validați și salvați în wallet. 5) Heartbeat: POST /sentinels/heartbeat la interval; include instance_id și versiune. 6) Producer descriptor publish: POST /services/{id}/descriptor periodic sau la schimbări endpoints.",
+    "technical_requirements": [
+      "HTTPX async",
+      "mTLS",
+      "ETag caching"
+    ],
+    "dependencies": [
+      "TASK-026",
+      "TASK-027",
+      "TASK-029",
+      "TASK-033"
+    ],
+    "security_considerations": [
+      "MITM către Discovery: mTLS + pinning certificat Discovery în config bundle pentru medii sensibile",
+      "Config injection: validați semnătura config bundle și refuzați downgrade de version"
+    ],
+    "edge_cases": [
+      "Discovery down: aplicați backoff și continuați să serviți trafic cu config/cred cache, conform politicii",
+      "Network flapping: evitați thundering herd (jitter) pentru polling în cluster"
+    ],
+    "acceptance_criteria": [
+      "Sentinel se poate onboard-a și își poate sincroniza config/credentials",
+      "Polling folosește ETag și nu re-downloadează inutil",
+      "Heartbeats sunt vizibile în Discovery și sunt rate-limited safe"
+    ]
+  },
+  {
+    "id": "TASK-041",
+    "title": "Sentinel: integrare engine VC/VP (issue/verify/present) folosind DIDKit (Python) sau echivalent",
+    "component": "sentinel",
+    "description": "Integrați o bibliotecă care poate verifica JWT-VC/JWT-VP și poate construi prezentări (VP) din VCs. Scop: implementare corectă față de standarde fără a reinventa semantica VC.",
+    "objectives": [
+      "Verificare completă VC/VP (semnătură, exp/nbf, structură, status ref)",
+      "Construire VP pentru consumer cu set minim de VCs necesare",
+      "Suport pentru DID methods selectate în TASK-003"
+    ],
+    "implementation_details": "1) Evaluați DIDKit Python ca motor SSI (are suport VC/DID și este distribuit ca pachet). citeturn2search5 2) Implementați wrapper /libs/common/vc_engine cu funcții: verify_vc(vc_jwt, resolver, now), verify_vp(vp_jwt,...), create_vp(vcs, aud, nonce, env, exp). 3) Implementați DID resolver plugin: did:key derivation local și (opțional) did:ethr resolution prin chain client (dacă necesar). 4) Standardizați erorile: returnați coduri: VC_EXPIRED, ISSUER_UNTRUSTED, STATUS_REVOKED, VP_INVALID, DID_UNRESOLVABLE. 5) Scrieți teste cu vectors: VC valid, VC revocat, VP invalid signature, VP wrong aud/env.",
+    "technical_requirements": [
+      "DIDKit Python citeturn2search5",
+      "W3C VC DM 2.0 citeturn0search1",
+      "VC-JOSE-COSE citeturn2search0"
+    ],
+    "dependencies": [
+      "TASK-003",
+      "TASK-038",
+      "TASK-028"
+    ],
+    "security_considerations": [
+      "Parser differences: fixați strict accepted algorithms și respingeți 'none' sau alg neacceptat",
+      "Dependency risk: pin versions și rulați SCA în CI (TASK-064)"
+    ],
+    "edge_cases": [
+      "VP conține VCs redundante: implementați selecție minimă după scope/policy pentru a reduce leakage",
+      "DID resolution lent: folosiți cache și timeouts, altfel crește latența request path"
+    ],
+    "acceptance_criteria": [
+      "Sentinel poate verifica VC/VP emise de Discovery în test stack",
+      "Wrapper returnează erori standardizate și log-friendly",
+      "Există teste unitare cu cazuri pozitive și negative"
+    ]
+  },
+  {
+    "id": "TASK-042",
+    "title": "Sentinel: client Trust Layer (IssuerRegistry/PolicyRegistry/StatusRegistry/ServiceRegistry) cu caching și staleness control",
+    "component": "sentinel",
+    "description": "Implementați modulul care citește starea on-chain necesară verificării: issuers autorizați, policy params, anchors status list, service bindings. Include caching și fallback în outage.",
+    "objectives": [
+      "Verificare issuer trust independent de Discovery",
+      "Obținere parametri globali (Δ/maxSkew) din chain",
+      "Reducerea traficului RPC prin caching"
+    ],
+    "implementation_details": "1) Integrați /libs/chain pentru read-only calls (TASK-020). 2) Cache în memorie + persistent (opțional) cu TTL: issuers (ex 60s), policy params (ex 60s), status anchors (ex 30s), service bindings (ex 60s). 3) Implementați „staleness state”: dacă RPC down, folosiți cache doar dacă age <= max_cache_age; altfel treceți la fail-closed sau degrade conform config. 4) Integrați cu VC/VP verify: înainte de acceptarea unui VC, verificați issuer active și schema enabled; înainte de status verify, obțineți anchor hash+updatedAt. 5) Logați lag și staleness metrici.",
+    "technical_requirements": [
+      "web3.py async citeturn3search11",
+      "Contract registries (TASK-014..017)"
+    ],
+    "dependencies": [
+      "TASK-020",
+      "TASK-041",
+      "TASK-007"
+    ],
+    "security_considerations": [
+      "Cache poisoning: nu acceptați date fără verificare de proveniență; ancora on-chain este sursa de adevăr",
+      "Stale trust decisions: enforce Δ și max_cache_age strict pentru operații sensibile"
+    ],
+    "edge_cases": [
+      "RPC răspunde lent: timeouts trebuie să fie scurte și să nu blocheze request path (folosiți async + fallback)",
+      "Schimbare issuer status între două request-uri: acceptați eventual consistency, dar refresh frecvent"
+    ],
+    "acceptance_criteria": [
+      "Sentinel poate citi registries de pe chain local și poate valida issuer/schema/status anchor",
+      "Fallback behavior este determinist și configurabil",
+      "Metricile includ cache hit rate și staleness state"
+    ]
+  },
+  {
+    "id": "TASK-043",
+    "title": "Sentinel: implementarea Request Security Envelope (semnare consumer și verificare producer)",
+    "component": "sentinel",
+    "description": "Implementați efectiv schema din TASK-006 în cod: construirea proof-ului, calcul hash-uri, atașare VP, verificare completă la Producer Sentinel.",
+    "objectives": [
+      "Semnare și verificare compatibile (aceeași canonicalizare)",
+      "Anti-replay (jti + cache) și TTL strict",
+      "Binding aud/env/body_hash enforced"
+    ],
+    "implementation_details": "1) Implementați ProofClaims builder: calculează query_hash, body_hash (streaming), setează iat/exp și jti. 2) Semnați JWS cu cheia DID a consumerului; atașați în header Authorization: SentinelProof <jws>. 3) Atașați VP (JWT-VP) în header SentinelVP sau ca body field; fixați și documentați. 4) Pe producer: verificați semnătura JWS, validați exp/iat cu maxSkew din policy on-chain (TASK-042), recomputați body_hash, validați aud/env. 5) Replay cache: înregistrați jti imediat după verificări de bază (înainte de acces la backend) și respingeți duplicates.",
+    "technical_requirements": [
+      "JOSE/JWS (VC-JOSE-COSE) citeturn2search0",
+      "DPoP concepts pentru jti/iat/req binding citeturn0search3"
+    ],
+    "dependencies": [
+      "TASK-006",
+      "TASK-039",
+      "TASK-041",
+      "TASK-042"
+    ],
+    "security_considerations": [
+      "Canonicalizare inconsistentă (body hash): determină false negatives/positives; fixați exact encoding și content-type handling",
+      "Leakage în headers: limitați mărimea VP și evitați logarea header-elor brute"
+    ],
+    "edge_cases": [
+      "Content-Encoding (gzip): decideți dacă hash e pe bytes după decomprimare sau before; fixați și enforce",
+      "Chunked transfer: hash streaming obligatoriu; dacă nu, interziceți chunked în MVP"
+    ],
+    "acceptance_criteria": [
+      "Consumer poate produce proof valid, iar producer îl poate valida",
+      "Replay este detectat determinist (jti duplicate respins)",
+      "Body tampering este detectat (body_hash mismatch respins)"
+    ]
+  },
+  {
+    "id": "TASK-044",
+    "title": "Consumer Sentinel: pipeline outbound complet (resolve, select endpoint, attach proofs, retries, backoff)",
+    "component": "sentinel",
+    "description": "Implementați fluxul complet de la client local către producer: resolve route prin Discovery, selecție endpoint multi-instance, atașare VC/VP + proof, trimitere, și retry policy sigură.",
+    "objectives": [
+      "Consumer trimite request-uri doar către endpoints descoperite și validate",
+      "Selecție endpoint robustă (weighted r/r) și failover",
+      "Retry policy care nu produce replay accidental"
+    ],
+    "implementation_details": "1) Implementați endpoint local pentru aplicațiile client: /invoke/{service_id}/{path} (sau proxy transparent). 2) Resolve: cere ServiceDescriptor de la Discovery (TASK-032) și verifică semnătura producerului. 3) Select endpoint: aplicați algoritm determinist (weighted round-robin) și exclude endpoints unhealthy (din cache). 4) Selectați VCs relevante (scope match) și construiți VP cu aud=producer_service_did și env. 5) Construiți proof (TASK-043) și trimiteți request către producer endpoint. 6) Retries: la erori de rețea, refaceți proof cu jti nou (niciodată nu retrimiteți același jti). 7) Propagați trace_id și correlation_id.",
+    "technical_requirements": [
+      "HTTPX async",
+      "Service descriptor verification (JWS)",
+      "Request proof module (TASK-043)"
+    ],
+    "dependencies": [
+      "TASK-037",
+      "TASK-040",
+      "TASK-041",
+      "TASK-043",
+      "TASK-032"
+    ],
+    "security_considerations": [
+      "SSRF prin path/host injection: consumer poate trimite doar către endpoints din descriptor valid",
+      "Retry poate crea replay: jti trebuie regenerat la fiecare retry și replay cache pe producer va respinge duplicates"
+    ],
+    "edge_cases": [
+      "Producer endpoint schimbat între resolve și send: folosiți descriptor TTL scurt și re-resolve la 401/404 specific",
+      "VP expiră în timpul retry: dacă exp e scurt, regenerați VP la retry"
+    ],
+    "acceptance_criteria": [
+      "Consumer poate rezolva descriptor semnat și poate trimite request către producer",
+      "Failover între endpoints funcționează (simulați un endpoint down)",
+      "Retry folosește jti nou și request-ul rămâne acceptat"
+    ]
+  },
+  {
+    "id": "TASK-045",
+    "title": "Producer Sentinel: pipeline inbound complet (verify proof, verify VP/VC, trust checks, policy, forward)",
+    "component": "sentinel",
+    "description": "Implementați fluxul de recepție: verificare request proof, verificare VP/VC, verificare status/revocare, evaluare policy și proxy către serviciul local. Returnați erori deterministe cu reason codes.",
+    "objectives": [
+      "Enforcement complet al trust policy înainte de a atinge serviciul local",
+      "Decizii auditabile (permit/deny + reason) fără leakage de secrete",
+      "Performanță: pipeline optimizat cu caching și order corect al verificărilor"
+    ],
+    "implementation_details": "1) La intrare: validați request size/timeouts; extrageți SentinelProof și SentinelVP. 2) Verificați proof (TASK-043): semnătură, aud/env, body_hash, jti unic, nonce. 3) Verificați VP/VC (TASK-041): semnături, exp/nbf, schema. 4) Trust checks (TASK-042): issuer active, schema enabled. 5) Revocation (TASK-046): verificați status list și emergency revoke; enforce Δ. 6) Policy (TASK-047): map resource/method/path la scopes; decide permit/deny. 7) Dacă permit: forward către backend local și aplicați header scrubbing; dacă deny: returnați 401/403 cu reason code (fără detalii sensibile). 8) Log: decision, trace_id, jti hash, consumer DID hash.",
+    "technical_requirements": [
+      "VC/VP engine (TASK-041)",
+      "Trust registry client (TASK-042)",
+      "Revocation manager (TASK-046)",
+      "Policy engine (TASK-047)"
+    ],
+    "dependencies": [
+      "TASK-041",
+      "TASK-042",
+      "TASK-043",
+      "TASK-046",
+      "TASK-047",
+      "TASK-037"
+    ],
+    "security_considerations": [
+      "Bypass prin order greșit: verificați proof și replay înainte de verificări costisitoare; refuzați rapid",
+      "Information leakage: error responses trebuie să fie coarse-grained; logați detaliile doar intern și redactat"
+    ],
+    "edge_cases": [
+      "Consumer prezintă VC valid dar issuer disabled între timp: refuzați imediat pe baza chain state/cache",
+      "Req fără VP: refuzați determinist (401) cu reason=missing_vp"
+    ],
+    "acceptance_criteria": [
+      "Producer respinge request invalid (proof/vp/status/policy) cu coduri stabile",
+      "Producer acceptă request valid și îl forwardează către backend",
+      "Replay și tampering sunt detectate în pipeline"
+    ]
+  },
+  {
+    "id": "TASK-046",
+    "title": "Sentinel: revocation manager cu Δ bounded-freshness, cache, și politici de outage",
+    "component": "sentinel",
+    "description": "Implementați modulul care face verificarea status list și enforce Δ, incluzând caching, refresh scheduling și comportament la outage (fail-closed/degrade).",
+    "objectives": [
+      "Verify status determinist conform TASK-007",
+      "Minimize RPC/HTTP calls prin cache și batch",
+      "Control clar al „stale mode”"
+    ],
+    "implementation_details": "1) Cache status lists pe disk (encrypted) + mem; indexați după statusListId. 2) Pentru verificare: (a) obțineți anchor (rootHash, updatedAt) din chain cache (TASK-042), (b) dacă status list local lipsește sau hash mismatch, download de la Discovery endpoint și verificați semnătura + hash. 3) Enforce Δ: dacă now - anchor.updatedAt > Δ, considerați status stale; aplicați politica configurată (default fail-closed). 4) Scheduler: refresh periodic (ex: la Δ/2) și jitter per instance. 5) Implementați emergency revoke check: query on-chain mapping pentru credentialIdHash.",
+    "technical_requirements": [
+      "Bitstring Status List v1.0 citeturn0search2",
+      "Chain client (TASK-042)"
+    ],
+    "dependencies": [
+      "TASK-007",
+      "TASK-042",
+      "TASK-038"
+    ],
+    "security_considerations": [
+      "Stale-accept: dacă fail-open e permis, limitați privilegiile (degraded privileges) și logați alertă",
+      "Downgrade attack: refuzați status list dacă hash nu corespunde anchor-ului"
+    ],
+    "edge_cases": [
+      "Status list download slow: timeouts + fallback la cache dacă încă în Δ",
+      "Multiple status lists pentru aceeași credențială (misconfig): refuzați ca invalid și alertați"
+    ],
+    "acceptance_criteria": [
+      "Sentinel poate detecta revocare prin bitstring și poate respinge request-ul",
+      "Δ este enforce-uit și stale mode este vizibil (metric + log)",
+      "Hash mismatch între status list și anchor duce la refuz"
+    ]
+  },
+  {
+    "id": "TASK-047",
+    "title": "Sentinel: policy engine implementabil (ABAC/capability) + format policy (YAML) + hot reload controlat",
+    "component": "sentinel",
+    "description": "Implementați motorul de politici care decide Permit/Deny pe baza resursei, acțiunii, env și claims din VCs. Politicile trebuie să fie versionate și aplicabile fără redeploy (hot reload cu semnătură).",
+    "objectives": [
+      "Evaluare deterministă și explicabilă (reason codes)",
+      "Policy format simplu (YAML/JSON) și validat (Pydantic)",
+      "Hot reload sigur (semnat de Discovery sau operator)"
+    ],
+    "implementation_details": "1) Definiți model policy: rules[] cu match(service_id, path_glob, method), required_scopes[], required_issuer(optional), env, decision. 2) Implementați evaluator: ordonează regulile după specificitate (exact > glob), first-match sau best-match (fixați). 3) Implementați „explain output”: returnează rule_id, missing_scopes, reason. 4) Policy distribution: includeți policy în config bundle semnat (TASK-027) sau într-un endpoint separat semnat; Sentinel validează semnătura înainte de aplicare. 5) Hot reload: aplicați policy nouă atomic (swap) și păstrați ultima policy validă pentru rollback.",
+    "technical_requirements": [
+      "Pydantic models",
+      "YAML parser",
+      "Config bundle signing (TASK-027)"
+    ],
+    "dependencies": [
+      "TASK-004",
+      "TASK-027",
+      "TASK-037"
+    ],
+    "security_considerations": [
+      "Policy injection (local file tamper): cereți semnătură și verificați; restricționați permisiuni file",
+      "Over-permissive rules: includeți linting policy și test vectors în CI"
+    ],
+    "edge_cases": [
+      "Reguli conflictuale: defineți prioritate deterministă și logați warning",
+      "Hot reload în timpul request: swap atomic și thread-safe"
+    ],
+    "acceptance_criteria": [
+      "Policy engine produce Permit/Deny determinist pentru un set de vectors",
+      "Policy poate fi actualizată fără restart și fără race conditions",
+      "Decizia include reason codes pentru audit"
+    ]
+  },
+  {
+    "id": "TASK-048",
+    "title": "Sentinel: suport multi-instance (shared identity), instance registration și load distribution",
+    "component": "sentinel",
+    "description": "Implementați funcționarea corectă în cluster: mai multe instanțe Sentinel folosesc același DID și credențiale, își publică endpoints în descriptor, și rămân leaderless.",
+    "objectives": [
+      "Scale-out fără schimbare de DID",
+      "Publicare endpoints multi-instance în ServiceDescriptor",
+      "Comportament determinist fără leader election pentru MVP"
+    ],
+    "implementation_details": "1) Generați instance_id la startup (UUID) și includeți în heartbeat și descriptor. 2) Toate instanțele folosesc aceeași cheie DID din Vault (TASK-038) și aceeași wallet sync (TASK-040); nu păstrați state divergent. 3) Descriptor publish: fiecare instanță poate publica, dar pentru a evita conflicte, implementați dedup + merge logic în Discovery (sau folosiți un „publisher lock” în Vault/Redis). 4) Consumer selection: folosiți weight/health dacă disponibile. 5) Implementați graceful shutdown: instanța marchează endpoint-ul ca draining (descriptor update) înainte de stop.",
+    "technical_requirements": [
+      "Vault/KV/Redis pentru coordonare opțională",
+      "ServiceDescriptor schema (TASK-032)"
+    ],
+    "dependencies": [
+      "TASK-008",
+      "TASK-032",
+      "TASK-033",
+      "TASK-038",
+      "TASK-040"
+    ],
+    "security_considerations": [
+      "Key sharing crește impactul compromise: aplicați hardening și rotație periodică; monitorizați anomalie per instance_id",
+      "Descriptor conflict poate duce la endpoint poisoning; semnătura DID + merge logic strict"
+    ],
+    "edge_cases": [
+      "Două instanțe publică descriptor simultan: Discovery trebuie să rezolve determinist (last-write-wins cu monotonic ts sau merge)",
+      "Instanță moartă rămâne în descriptor: TTL pe endpoints și pruning automat"
+    ],
+    "acceptance_criteria": [
+      "Două instanțe pot rula simultan și consumer poate face load distribution",
+      "Descriptor reflectă endpoints active și se curăță după TTL",
+      "Shutdown graceful reduce erori în trafic"
+    ]
+  },
+  {
+    "id": "TASK-049",
+    "title": "Sentinel: migrare și re-registration tooling (sentinelctl) + procedură de rejoin sigură",
+    "component": "sentinel",
+    "description": "Implementați un CLI și proceduri pentru migrarea Sentinel pe alt VM/host fără schimbare de identitate și cu rejoin sigur la Discovery.",
+    "objectives": [
+      "Migrare fără downtime major (mai ales în mod multi-instance)",
+      "Rejoin sigur cu același DID prin PoP",
+      "Export/import controlat pentru mod local (dev/break-glass)"
+    ],
+    "implementation_details": "1) Implementați sentinelctl commands: status, init, rotate-key, backup (local mode), restore (local mode), rejoin (trigger handshake). 2) Pentru Vault mode: migrarea e redeploy; sentinelctl doar verifică acces la Vault și semnează PoP challenge. 3) Pentru local mode: backup produce un fișier criptat (AES-GCM) cu secret versions + wallet; restore îl reintroduce cu perms stricte. 4) Rejoin: apelează Discovery /sentinels/onboard sau /rejoin cu migration ticket; actualizează endpoints/instance metadata. 5) Documentați runbook: pași migrare single-instance vs multi-instance.",
+    "technical_requirements": [
+      "CLI framework (typer/click)",
+      "SecretStorage backend (TASK-011)",
+      "Onboarding spec (TASK-005)"
+    ],
+    "dependencies": [
+      "TASK-039",
+      "TASK-040",
+      "TASK-008"
+    ],
+    "security_considerations": [
+      "Backup file theft: criptare + passphrase; recomandare de stocare offline; audit al folosirii restore",
+      "Migration ticket abuse: one-time și expirare scurtă; logați utilizarea"
+    ],
+    "edge_cases": [
+      "Restore pe host nou cu versiune sentinel diferită: includeți compat/version check și migrare format wallet",
+      "Redeploy în cluster: două instanțe cu config diferit; enforce config version compatibilă"
+    ],
+    "acceptance_criteria": [
+      "Sentinel poate fi mutat și își păstrează DID-ul și credențialele",
+      "Rejoin reînregistrează endpoint-uri și heartbeat fără duplicate per service",
+      "Backup/restore funcționează în local mode cu criptare verificată"
+    ]
+  },
+  {
+    "id": "TASK-050",
+    "title": "Sentinel: replay cache, nonce handling și defensivă împotriva clock skew",
+    "component": "security",
+    "description": "Implementați componentele de anti-replay și time validation: replay cache pentru jti, nonce store pentru challenges, și reguli de clock skew (configurabile) aliniate cu parametri din chain policy.",
+    "objectives": [
+      "Blocarea replay-urilor deterministă în fereastra proof TTL",
+      "Nonce-uri one-time pentru challenge/PoP și request binding",
+      "Comportament robust în prezența skew și NTP drift"
+    ],
+    "implementation_details": "1) Implementați replay cache per Producer Sentinel: Redis preferat; fallback memory LRU cu TTL. Key = hash(jti + iss + aud), TTL = exp-iat + skew. 2) Implementați nonce store: (a) onboarding PoP nonce (Discovery side) și (b) request nonce (optional per-session). 3) Timp: folosiți time.time() UTC; validați iat/exp în raport cu maxClockSkewSeconds din TrustPolicyRegistry (TASK-015). 4) Dacă skew depășit: returnați error code CLOCK_SKEW și logați o alertă; opțional expuneți metric. 5) Asigurați atomicity la insert: check-and-set în Redis pentru jti.",
+    "technical_requirements": [
+      "Redis (preferat)",
+      "Policy params on-chain (TASK-015)"
+    ],
+    "dependencies": [
+      "TASK-043",
+      "TASK-015",
+      "TASK-035"
+    ],
+    "security_considerations": [
+      "Replay cache evasion prin jti variat: jti e unic; dar atacator poate trimite multe; aplicați rate limiting și WAF la ingress",
+      "Clock manipulation: în prod impuneți NTP și monitorizați offset"
+    ],
+    "edge_cases": [
+      "Redis down: fallback LRU poate pierde protecție cross-instance; în cluster fail-closed pentru operații sensibile",
+      "JTI collision (extrem de rar): dacă se întâmplă, refuzați și logați"
+    ],
+    "acceptance_criteria": [
+      "Replay determinist: același request retrimis este respins",
+      "Skew handling: request cu iat prea în viitor este respins",
+      "Nonces expira și nu pot fi refolosite"
+    ]
+  },
+  {
+    "id": "TASK-051",
+    "title": "Sentinel: request/activity logging structurat, redactare și retenție locală",
+    "component": "sentinel",
+    "description": "Implementați logging-ul obligatoriu la sentinel: loguri de request (permit/deny), motive, latente, și export opțional. Includeți redactare strictă și retenție locală configurabilă.",
+    "objectives": [
+      "Vizibilitate live și audit-suitable fără a expune VCs/VPs",
+      "Loguri structurate și corelate (trace_id, instance_id)",
+      "Rotație/filerolling și retenție"
+    ],
+    "implementation_details": "1) Definiți schema log event: ts, direction(in/out), role, service_id, env, consumer_did_hash, decision, reason, http_status, latency_ms, jti_hash, trace_id. 2) Redactare: nu logați headers brute, nu logați VP/VC complet; logați doar id/hash. 3) Implementați handler: JSON logs către stdout + file (rotating). 4) Retenție: maxim N zile sau N MB; ștergere automată. 5) Integrați cu UI live logs (TASK-054/055) și cu export OTEL logs (TASK-052/063).",
+    "technical_requirements": [
+      "Structured logging (json)",
+      "RotatingFileHandler",
+      "Redaction allow-list"
+    ],
+    "dependencies": [
+      "TASK-045",
+      "TASK-012"
+    ],
+    "security_considerations": [
+      "Leakage accidental prin exception traces: sanitize exceptions; nu includeți request body în stacktraces",
+      "Log forging: includeți structured logs și validați encoding; evitați concatenări naive"
+    ],
+    "edge_cases": [
+      "High throughput: logging sync poate încetini; folosiți queue handler și batch flush",
+      "Disk full: fallback la stdout only și alertați; nu opriți request path"
+    ],
+    "acceptance_criteria": [
+      "Logs includ câmpurile standard și sunt redactate",
+      "Rotația și retenția funcționează (test cu volum)",
+      "Live logs pot fi consumate de UI fără a expune secrete"
+    ]
+  },
+  {
+    "id": "TASK-052",
+    "title": "Sentinel: instrumentare OpenTelemetry + metrici Prometheus (gateway KPIs și security KPIs)",
+    "component": "sentinel",
+    "description": "Instrumentați sentinel cu tracing/metrics conform Telemetry Spec, incluzând KPI-uri specifice securității (deny reasons, replay hits, status stale).",
+    "objectives": [
+      "Observabilitate completă pentru p50/p95 latente și rate-uri",
+      "Metrici de securitate pentru detecția atacurilor",
+      "Compatibilitate cu OTel Collector/Alloy"
+    ],
+    "implementation_details": "1) Instrumentare FastAPI cu OTel (auto + manual spans). citeturn4search0 2) Adăugați spans pentru: resolve descriptor, build VP, verify proof, verify vc, check revocation, policy evaluate, proxy upstream. 3) Expuneți /metrics Prometheus: inbound_requests_total, outbound_requests_total, denies_total{reason}, replay_rejects_total, status_stale_total, chain_cache_miss_total, upstream_latency histograms. 4) Config sampling per env. 5) Integrați cu export OTLP către Collector. citeturn5search7",
+    "technical_requirements": [
+      "OpenTelemetry FastAPI instrumentation citeturn4search0",
+      "OpenTelemetry Collector citeturn5search7",
+      "Prometheus exposition guidelines citeturn4search1"
+    ],
+    "dependencies": [
+      "TASK-012",
+      "TASK-037",
+      "TASK-045",
+      "TASK-046",
+      "TASK-050"
+    ],
+    "security_considerations": [
+      "Cardinality: reason labels trebuie să fie finite și predefinite",
+      "Export down: nu blocați request; batch și timeout"
+    ],
+    "edge_cases": [
+      "Burst traffic: metric locks pot crea contention; folosiți librării thread-safe și evitați high-cardinality labels",
+      "Collector backlog: sampling și backpressure"
+    ],
+    "acceptance_criteria": [
+      "Sentinel exportă OTLP traces și are /metrics scrape-uibil",
+      "Există metrici specifice security (replay, stale, deny reasons)",
+      "Trace_id este propagat consumer→producer"
+    ]
+  },
+  {
+    "id": "TASK-053",
+    "title": "Sentinel: hardening de securitate (TLS config, dependency pinning, sandboxing, file perms, secure defaults)",
+    "component": "security",
+    "description": "Aplicați măsuri de hardening pe runtime-ul Sentinel: TLS, mTLS, cipher suites, file permissions, seccomp/apparmor (dacă e containerizat), și supply-chain controls.",
+    "objectives": [
+      "Reducerea suprafeței de atac la nivel de OS/container",
+      "Configurare TLS sigură și consistentă pentru toate conexiunile",
+      "Automatizări de securitate în build și deploy"
+    ],
+    "implementation_details": "1) TLS: configurați doar TLS 1.2+ (preferat 1.3) și dezactivați cipher-uri slabe; activați certificate pinning către Discovery în medii sensibile. 2) mTLS: impuneți pentru call-uri Sentinel→Discovery și opțional pentru traffic sentinel↔sentinel. 3) File perms: validați la startup că wallet/keys sunt 0600/0700; refuzați start dacă nu. 4) Container hardening: run as non-root, read-only filesystem unde posibil, drop Linux capabilities. 5) Dependency pinning + SCA în CI (TASK-064).",
+    "technical_requirements": [
+      "TLS/mTLS",
+      "Container security (non-root, seccomp/apparmor)",
+      "SCA tooling"
+    ],
+    "dependencies": [
+      "TASK-038",
+      "TASK-064",
+      "TASK-062"
+    ],
+    "security_considerations": [
+      "Misconfig TLS poate rupe conectivitatea; furnizați profile per env și teste",
+      "Non-root poate necesita permisiuni pentru porturi; folosiți >1024 și reverse proxy dacă necesar"
+    ],
+    "edge_cases": [
+      "Cert rotation: suportați reload fără restart (SIGHUP) sau rolling restarts",
+      "Read-only FS: logging local trebuie să scrie în volume dedicate"
+    ],
+    "acceptance_criteria": [
+      "Sentinel rulează non-root în container și pornește fără capabilități inutile",
+      "TLS/mTLS funcționează și respinge certificate invalide",
+      "Startup checks eșuează dacă file perms sunt nesigure"
+    ]
+  },
+  {
+    "id": "TASK-054",
+    "title": "Sentinel UI minimal: pagini locale pentru DID, VC summary, health și log viewer",
+    "component": "sentinel",
+    "description": "Implementați o interfață locală minimală (FastAPI + template/static) care afișează: Sentinel DID, VC-urile asociate (summary), log-uri live/recente, și health info. UI trebuie să rămână intenționat minimală.",
+    "objectives": [
+      "Vizibilitate rapidă pentru operator local fără tool-uri externe",
+      "Fără funcții administrative periculoase în UI (read-only by default)",
+      "Compatibilitate cu log streaming"
+    ],
+    "implementation_details": "1) Implementați /ui ca un set de pagini HTML simple (Jinja2 sau static + minimal JS). 2) Page DID: afișează did string + fingerprint public key. 3) Page Credentials: listează credențiale active cu: type, exp, aud, env, statusListId, dar fără payload complet (doar expand on demand cu warning). 4) Page Health: uptime, last config version, last credential sync, chain cache age, Δ status age. 5) Page Logs: ultimele N evenimente redactate din TASK-051.",
+    "technical_requirements": [
+      "FastAPI static/templates",
+      "SSE/WebSocket pentru live logs (TASK-055)"
+    ],
+    "dependencies": [
+      "TASK-051",
+      "TASK-052",
+      "TASK-037"
+    ],
+    "security_considerations": [
+      "UI expune date sensibile local: bind doar pe localhost și pune auth opțional (TASK-056)",
+      "XSS prin log rendering: escape HTML strict și nu injectați raw strings"
+    ],
+    "edge_cases": [
+      "Volume mare de logs: paginare și limită N; nu încărcați tot în browser",
+      "Credențiale foarte mari: afișați doar summary; payload complet doar prin download explicit"
+    ],
+    "acceptance_criteria": [
+      "UI afișează DID, credențiale summary, health și loguri recente",
+      "UI nu oferă by-default operații de mutare state",
+      "UI funcționează fără dependințe front-end grele"
+    ]
+  },
+  {
+    "id": "TASK-055",
+    "title": "Sentinel UI: live request logs prin SSE/WebSocket cu backpressure și filtre",
+    "component": "sentinel",
+    "description": "Implementați streaming live al logurilor către UI folosind Server-Sent Events (SSE) sau WebSocket, cu filtrare (permit/deny) și protecție la backpressure.",
+    "objectives": [
+      "Operatorul vede în timp real traficul și deciziile",
+      "Nu afectați performanța request path",
+      "Evitați memory bloat în cazul clientului lent"
+    ],
+    "implementation_details": "1) Implementați un buffer ring în memorie (ex: 10k events) alimentat de logger queue (TASK-051). 2) Endpoint SSE: GET /ui/logs/stream?filter=... care trimite evenimente redactate. 3) Backpressure: dacă clientul e lent sau disconnect, opriți stream și eliberați resurse; nu bufferizați infinit. 4) Filtre: permit/deny, service_id, reason. 5) Testați cu load generator și multiple conexiuni UI.",
+    "technical_requirements": [
+      "SSE sau WebSocket (FastAPI)",
+      "Ring buffer + queue"
+    ],
+    "dependencies": [
+      "TASK-054",
+      "TASK-051"
+    ],
+    "security_considerations": [
+      "Leakage în stream: trimiteți doar evenimente redactate; nu transmiteți headers/payload",
+      "DoS prin multe conexiuni SSE: limitați conexiuni și aplicați rate limiting local"
+    ],
+    "edge_cases": [
+      "Browser refresh: clientul pierde evenimente; acceptabil, dar includeți lastEventId pentru resume (opțional)",
+      "Conn drop frecvent: reconectare cu jitter"
+    ],
+    "acceptance_criteria": [
+      "Logurile apar live în UI sub load moderat",
+      "Memoria rămâne stabilă cu clienți lenți",
+      "Filtrele funcționează și nu expun date sensibile"
+    ]
+  },
+  {
+    "id": "TASK-056",
+    "title": "Sentinel UI: control acces local (bind localhost, optional auth, CSRF pentru mutații)",
+    "component": "security",
+    "description": "Asigurați că UI-ul Sentinel rămâne local și sigur: by default servește doar pe loopback, oferă autentificare opțională și protecții de bază împotriva atacurilor web locale.",
+    "objectives": [
+      "UI inaccesibil din rețea by default",
+      "Auth opțional pentru hosturi shared/jumpbox",
+      "Protecție CSRF dacă există endpoints de mutare state (ideal: none)"
+    ],
+    "implementation_details": "1) Bind server UI doar pe 127.0.0.1 în config default. 2) Implementați opțional Basic Auth sau token local (env var) pentru /ui. 3) Dacă există endpoints de mutare state (ex: rotate key) expuneți-le doar pe localhost + cereți auth + CSRF token; ideal păstrați doar CLI pentru mutații. 4) Adăugați headers CSP restrictive și dezactivați embedding. 5) Documentați cum se face port-forward în Kubernetes pentru acces local.",
+    "technical_requirements": [
+      "FastAPI dependencies for auth",
+      "Secure headers"
+    ],
+    "dependencies": [
+      "TASK-054"
+    ],
+    "security_considerations": [
+      "Localhost bypass prin SSRF din browser: nu faceți fetch către resurse externe din UI",
+      "Parole slabe pentru Basic Auth: cereți token random și rotație"
+    ],
+    "edge_cases": [
+      "Operator are nevoie de remote access: folosiți SSH port-forward; nu expuneți UI direct",
+      "Browser caching a token: setați no-store pentru paginile sensibile"
+    ],
+    "acceptance_criteria": [
+      "UI este accesibil doar local by default",
+      "Auth opțional funcționează și protejează paginile",
+      "Nu există endpoints de mutare state expuse public"
+    ]
+  },
+  {
+    "id": "TASK-057",
+    "title": "Discovery UI: bootstrap React + Material UI, routing, auth integration și API client",
+    "component": "frontend",
+    "description": "Inițializați UI-ul Discovery (React + MUI), integrați autentificarea (OIDC/JWT), routing și un API client tipizat pentru backend.",
+    "objectives": [
+      "UI admin funcțional cu login și navigație",
+      "API client robust (refresh token, error handling)",
+      "Design minimal dar operabil (MUI components)"
+    ],
+    "implementation_details": "1) Creați proiect React (Vite sau CRA), instalați MUI. 2) Implementați auth flow: redirect la IdP, callback, stocare token (memory + refresh) și protecție route. 3) Implementați API client (axios/fetch) cu interceptor pentru auth header și retry controlat. 4) Layout: sidebar + topbar, pages placeholders pentru Services, Sentinels, Credentials, Revocations, Chain, Audit. 5) Implementați tematizare MUI și component library intern.",
+    "technical_requirements": [
+      "React",
+      "Material UI (MUI) https://mui.com/",
+      "OIDC/JWT (TASK-023)"
+    ],
+    "dependencies": [
+      "TASK-023",
+      "TASK-024",
+      "TASK-009"
+    ],
+    "security_considerations": [
+      "Token storage: evitați localStorage în prod; preferați memory + refresh și protecții XSS",
+      "CSP: aliniați cu backend secure headers"
+    ],
+    "edge_cases": [
+      "IdP downtime: UI trebuie să afișeze eroare clară și să permită retry",
+      "Token expiră în mijlocul acțiunii: reîncercați după refresh o singură dată"
+    ],
+    "acceptance_criteria": [
+      "UI pornește, user se poate autentifica și ajunge în dashboard",
+      "API client trimite token la backend și tratează 401 corect",
+      "Routing protejat funcționează"
+    ]
+  },
+  {
+    "id": "TASK-058",
+    "title": "Discovery UI: management servicii și sentinels (enrollment, status, multi-instance view)",
+    "component": "frontend",
+    "description": "Implementați ecranele principale pentru: listare/creare servicii, management sentinels (producer/consumer), generare și aprobare enrollment tokens, vizualizare heartbeat și instanțe.",
+    "objectives": [
+      "Operator poate înregistra servicii și vede asocierea lor cu sentinels",
+      "Operator poate genera/approva enrollment tokens și urmări onboarding",
+      "Operator poate vedea status (active/offline) și instanțele"
+    ],
+    "implementation_details": "1) Services page: tabel cu service_id, env, owner, status, last_descriptor_update; modale create/edit. 2) Sentinels page: tabel cu sentinel_did, role, env, service_id, status, last_seen; drill-down cu instances. 3) Enrollment flow: UI action „Create enrollment” + „Approve” (dacă required) + afișare token one-time cu copy + warning. 4) Integrați audit view snippet per sentinel/service (ultimele N acțiuni).",
+    "technical_requirements": [
+      "React + MUI DataGrid",
+      "Backend endpoints TASK-024..026 și TASK-033"
+    ],
+    "dependencies": [
+      "TASK-057",
+      "TASK-024",
+      "TASK-025",
+      "TASK-033"
+    ],
+    "security_considerations": [
+      "Expunerea token-ului: afișați doar o dată, mascați, și nu îl logați în UI errors",
+      "RBAC UI gating nu e suficient: backend enforced; UI doar reflectă rolurile"
+    ],
+    "edge_cases": [
+      "Multe sentinels: implementați server-side pagination și filtre",
+      "Status flapping: arătați o fereastră de stabilitate și clarificați „unknown” vs „offline”"
+    ],
+    "acceptance_criteria": [
+      "Operator poate crea servicii și poate gestiona sentinels din UI",
+      "Enrollment token creation/approval funcționează end-to-end",
+      "UI afișează status-ul instanțelor multi-instance"
+    ]
+  },
+  {
+    "id": "TASK-059",
+    "title": "Discovery UI: management credențiale și revocări (status lists, emergency revoke, rotații)",
+    "component": "frontend",
+    "description": "Implementați ecrane pentru emitere credențiale de acces, listare credențiale, revocare/suspendare, vizualizare status lists (summary) și rotația cheilor/cred.",
+    "objectives": [
+      "Operator poate acorda/retrage acces între consumer și producer",
+      "Revocările sunt vizibile, auditate și propagate",
+      "Status lists pot fi inspectate fără a expune date excesive"
+    ],
+    "implementation_details": "1) Credentials page: tabel cu credential_id, type, issuer, subject_did, aud, env, exp, status (active/revoked). 2) Issue wizard: select consumer sentinel, select producer service, select scopes, expirare, confirm. 3) Revoke action: reason + severity; confirmări (two-step) pentru prod. 4) Status list page: listează statusListId, updatedAt, anchorHash, lastAnchoredTx; nu afișați bitstring brut, doar statistici (revoked_count). 5) Link către audit events relevante.",
+    "technical_requirements": [
+      "React + MUI",
+      "Backend endpoints TASK-028..031",
+      "Bitstring status list concept citeturn0search2"
+    ],
+    "dependencies": [
+      "TASK-057",
+      "TASK-028",
+      "TASK-030",
+      "TASK-031"
+    ],
+    "security_considerations": [
+      "Acces la credențiale: UI nu trebuie să permită download de payload complet fără rol special și audit",
+      "Revocare greșită: implementați confirmări și reason obligatoriu"
+    ],
+    "edge_cases": [
+      "Rotație: credențiale vechi și noi coexistă; UI trebuie să afișeze starea (deprecated_until)",
+      "Lag chain anchoring: status list updated local dar anchor pending; afișați clar inconsistența"
+    ],
+    "acceptance_criteria": [
+      "Operator poate emite și revoca credențiale prin UI",
+      "Status lists sunt vizibile cu timestamps și anchors",
+      "UI arată clar state transitions și audit trail"
+    ]
+  },
+  {
+    "id": "TASK-060",
+    "title": "Discovery UI: dashboard chain + audit viewer (events, lag, incidente)",
+    "component": "frontend",
+    "description": "Implementați vizualizarea stării blockchain și a audit log: contract addresses, last processed block, lag, ultimele evenimente, incidente (issuer disabled, emergency revoke).",
+    "objectives": [
+      "Operator poate diagnostica rapid probleme de trust layer",
+      "Vizibilitate asupra lag-ului indexer și a ultimelor mutații",
+      "Audit log viewer cu filtre"
+    ],
+    "implementation_details": "1) Chain dashboard: network, chainId, contract addresses, rpc endpoint status, last_block, indexer_lag_blocks, last_event_ts. 2) Events view: tabel cu event_type, tx_hash, block, actor, payload summary. 3) Audit viewer: query cu filtre (actor, action, target, time range), paging, export JSONL. 4) Alert flags în UI (ex: issuer disabled recent, status stale).",
+    "technical_requirements": [
+      "Backend endpoints TASK-031 și TASK-034",
+      "React + MUI"
+    ],
+    "dependencies": [
+      "TASK-057",
+      "TASK-031",
+      "TASK-034"
+    ],
+    "security_considerations": [
+      "Tx_hash și payload pot conține info sensibilă (hash-uri); afișați minimul necesar",
+      "Export audit: restrict RBAC și watermark (actor) în export"
+    ],
+    "edge_cases": [
+      "Indexer down: UI trebuie să arate clar data stale și să recomande acțiunea (restart)",
+      "Volume mare de events: server-side paging și time-bucket queries"
+    ],
+    "acceptance_criteria": [
+      "UI afișează starea chain și lag indexer în timp real",
+      "Audit viewer filtrează și exportă paginat",
+      "Evenimentele critice sunt evidențiate (flags)"
+    ]
+  },
+  {
+    "id": "TASK-061",
+    "title": "Containerizare componente: Dockerfiles, imagini minimale, SBOM și semnare artefacte",
+    "component": "infrastructure",
+    "description": "Creați imagini container pentru Discovery și Sentinel, cu build reproducibil, imagini minimale și controale supply-chain (SBOM, signing).",
+    "objectives": [
+      "Deploy consistent în Kubernetes/VMs",
+      "Reducerea suprafeței de atac prin imagini minimale și non-root",
+      "Trasabilitate supply-chain (SBOM) pentru audit"
+    ],
+    "implementation_details": "1) Dockerfile multi-stage pentru Python: build wheels, apoi runtime slim. 2) Rulați ca non-root; expuneți port >1024. 3) Includeți healthcheck în container. 4) Generați SBOM (CycloneDX/SPDX) în CI și atașați la release. 5) Semnați imagini (cosign) și verificați în pipeline de deploy.",
+    "technical_requirements": [
+      "Docker multi-stage builds",
+      "SBOM tooling",
+      "Image signing (cosign sau echivalent)"
+    ],
+    "dependencies": [
+      "TASK-009",
+      "TASK-021",
+      "TASK-037"
+    ],
+    "security_considerations": [
+      "PyPI dependency poisoning: pin hashes și folosiți registru intern dacă e posibil",
+      "Secrets în build context: nu copiați .env; folosiți build args controlate"
+    ],
+    "edge_cases": [
+      "Native deps pentru DIDKit: asigurați build pentru linux/amd64 și linux/arm64; testați",
+      "Runtime CA certs: includeți update-ca-certificates și suport pentru custom CAs"
+    ],
+    "acceptance_criteria": [
+      "Imaginile Discovery și Sentinel se construiesc reproducibil și rulează non-root",
+      "SBOM este generat și publicat pentru fiecare build",
+      "Semnarea imaginilor este verificată în CI"
+    ]
+  },
+  {
+    "id": "TASK-062",
+    "title": "Deployment Kubernetes/Helm: manifests pentru Discovery, Sentinels, DB, Redis și secret integration",
+    "component": "infrastructure",
+    "description": "Creați Helm charts (sau manifests) pentru deploy în Kubernetes: Discovery, Sentinel (producer/consumer), Postgres/Redis (sau managed), ingress, service accounts, și integrare secrete (Vault/KMS).",
+    "objectives": [
+      "Deploy repeatable pe dev/test/prod",
+      "Config map + secrets gestionate sigur",
+      "Support rolling updates și multi-instance scaling"
+    ],
+    "implementation_details": "1) Helm chart per componentă: discovery, sentinel; values separate per env. 2) Adăugați readiness/liveness probes, resources requests/limits, HPA pentru sentinel. 3) Config: configmaps pentru non-secrets, secrets pentru tokens/certs; integrare Vault agent injector sau CSI driver. 4) Networking: internal services, ingress pentru UI; mTLS config pentru sentinel↔discovery (mount certs). 5) Pod security: runAsNonRoot, fsGroup, readOnlyRootFilesystem unde posibil.",
+    "technical_requirements": [
+      "Kubernetes",
+      "Helm",
+      "Vault/KMS integration (TASK-011)"
+    ],
+    "dependencies": [
+      "TASK-061",
+      "TASK-011",
+      "TASK-036",
+      "TASK-052"
+    ],
+    "security_considerations": [
+      "Secret sprawl: minimizați secrets și folosiți dynamic secrets unde posibil",
+      "Ingress exposure: UI doar pe HTTPS; restricționați IP ranges pentru admin în prod"
+    ],
+    "edge_cases": [
+      "Rolling update în timp ce rulează trafic: configurează maxUnavailable=0 pentru sentinel, preStop hooks pentru draining",
+      "HPA scaling: asigurați că shared identity backend suportă N instanțe simultan"
+    ],
+    "acceptance_criteria": [
+      "Charts deployează stack-ul în cluster de test fără manual steps",
+      "Scaling sentinel la 2+ replici funcționează",
+      "mTLS între sentinel și discovery este activ și verificat"
+    ]
+  },
+  {
+    "id": "TASK-063",
+    "title": "Observability stack deployment: OpenTelemetry Collector + Prometheus + Grafana + Loki cu Grafana Alloy (nu Promtail)",
+    "component": "infrastructure",
+    "description": "Implementați infrastructura de observabilitate pentru platformă. Includeți colectare unificată logs/metrics/traces și explicit evitați Promtail deoarece a ajuns la EOL (2 Mar 2026); folosiți Grafana Alloy ca agent/collector. citeturn5search1turn5search14turn5search7",
+    "objectives": [
+      "Colectare și corelare logs/metrics/traces între componente",
+      "Dashboards și alerte pentru KPIs și security signals",
+      "Stack suportat și actual (Alloy/OTel)"
+    ],
+    "implementation_details": "1) Deploy OpenTelemetry Collector (sau Grafana Alloy ca distribuție a OTel collector) pentru recepție OTLP. citeturn5search7turn5search14 2) Metrics: Prometheus scrape /metrics; respectați formatul de expunere. citeturn4search1 3) Logs: configurați Alloy să colecteze logs din stdout (K8s) și să le trimită la Loki; evitați Promtail (EOL). citeturn5search1 4) Grafana: importați dashboards predefinite (latency, deny reasons, revocation stale, chain lag). 5) Alerting: definește alert rules pentru: issuer disabled event, status stale > Δ, replay spikes, chain indexer lag, onboarding failures spikes.",
+    "technical_requirements": [
+      "OpenTelemetry Collector citeturn5search7",
+      "Grafana Alloy citeturn5search14turn5search1",
+      "Prometheus exposition format citeturn4search1"
+    ],
+    "dependencies": [
+      "TASK-012",
+      "TASK-036",
+      "TASK-052",
+      "TASK-062"
+    ],
+    "security_considerations": [
+      "Telemetry endpoints expuse public: restricționați accesul (cluster-internal) și autentificați dacă e necesar",
+      "Logs pot conține date sensibile: enforce redactare și acces RBAC în Grafana"
+    ],
+    "edge_cases": [
+      "High log volume: sampling sau drop policy în Alloy/Collector pentru a preveni cost/exhaustion",
+      "Collector down: buffer local limitat; nu blocați aplicațiile"
+    ],
+    "acceptance_criteria": [
+      "Traces, metrics și logs sunt vizibile în Grafana pentru Discovery și Sentinels",
+      "Alloy colectează logs (fără Promtail) și le trimite la Loki",
+      "Alertele critice sunt definite și pot fi testate (simulate conditions)"
+    ]
+  },
+  {
+    "id": "TASK-064",
+    "title": "CI/CD pipelines complete: build/test/lint, contract deploy, SAST/SCA, image signing, environment promotion",
+    "component": "infrastructure",
+    "description": "Implementați pipeline-uri end-to-end pentru toate componentele: Python, frontend, contracte. Includeți scanări de securitate și gating pentru promotion dev→test→prod.",
+    "objectives": [
+      "Automatizare completă a build-urilor și testării",
+      "Securitate supply-chain (SCA, SAST, signing)",
+      "Deployment repetabil și controlat pe environments"
+    ],
+    "implementation_details": "1) Pipeline CI: (a) Python lint/type/test, (b) frontend lint/test/build, (c) contract compile/test/static analysis (TASK-019). 2) SCA: dependency scanning pentru Python/Node; policy de blocking pentru vulnerabilities High/Critical. 3) Build imagini + SBOM + semnare (TASK-061). 4) CD: deploy automat pe dev la merge; manual approval pentru prod; rulează smoke tests post-deploy. 5) Contract deploy: pipeline separat cu approvals; publică ABI/address artifacts; actualizează config Discovery atomically.",
+    "technical_requirements": [
+      "CI system (GitHub Actions/GitLab CI)",
+      "SAST/SCA tooling",
+      "Container signing verification"
+    ],
+    "dependencies": [
+      "TASK-009",
+      "TASK-061",
+      "TASK-019",
+      "TASK-062"
+    ],
+    "security_considerations": [
+      "Secrets în CI: folosiți secret store al CI și separați cheile per env",
+      "Supply-chain: verificați semnătura imaginilor la deploy și blocați imagini nesemnate"
+    ],
+    "edge_cases": [
+      "Deploy fail partial: rollback automat (helm rollback) și alerts",
+      "Contract deploy schimbă ABI: gate ca breaking change și sincronizați release-ul back-end"
+    ],
+    "acceptance_criteria": [
+      "CI rulează pentru fiecare PR și blochează pe test/lint/security failures",
+      "Imaginile sunt semnate și verificate la deploy",
+      "Promotion dev→prod folosește approvals și rulează smoke tests"
+    ]
+  },
+  {
+    "id": "TASK-065",
+    "title": "E2E test harness și resilience tests: scenarii de atac, outage și recovery (inclusiv Δ staleness)",
+    "component": "security",
+    "description": "Construiți un set de teste end-to-end și de reziliență care validează proprietățile de securitate și comportamentul în outage: chain down, discovery down, status stale, replay attacks, key compromise simulation.",
+    "objectives": [
+      "Validare automată a invarianților din TASK-001 și mitigărilor din TASK-002",
+      "Măsurare latențe p50/p95 și impactul verificărilor",
+      "Verificare „bounded revocation” (Δ) și policy în stale mode"
+    ],
+    "implementation_details": "1) Folosiți docker-compose stack (TASK-010) ca environment de test. 2) Scrieți teste E2E: (a) onboarding end-to-end, (b) issue VC, (c) request permit, (d) revoke și verifică respingere după Δ, (e) replay de același proof (jti) respins. 3) Outage tests: opriți RPC node și verificați comportamentul (cache până la Δ, apoi fail-closed); opriți Discovery și validați că producer încă respinge neautorizat. 4) Compromise tests: simulați issuer disabled on-chain și validați că VCs sunt respinse imediat. 5) Raportați metrici: latență, success rate, time-to-containment.",
+    "technical_requirements": [
+      "pytest + integration test framework",
+      "docker-compose (TASK-010)",
+      "Observability metrics (TASK-052/063)"
+    ],
+    "dependencies": [
+      "TASK-010",
+      "TASK-045",
+      "TASK-046",
+      "TASK-031",
+      "TASK-050"
+    ],
+    "security_considerations": [
+      "Testele folosesc chei de test; separați total de prod și nu refolosiți",
+      "Chaos testing poate produce fals pozitive; determinați toleranțe și repetați testele"
+    ],
+    "edge_cases": [
+      "Flaky tests din cauza timpului (Δ): folosiți clock control (freezegun) sau reduceți Δ în test env",
+      "Chain reorg simulation dificil: măcar simulați rescan window în indexer"
+    ],
+    "acceptance_criteria": [
+      "Există un suite E2E care rulează în CI și validează permit/deny/replay/revoke",
+      "Outage tests demonstrează comportament conform politicilor (fail-closed/degrade) după Δ",
+      "Raportul de metrics (p95 etc.) este generat automat"
+    ]
+  },
+  {
+    "id": "TASK-066",
+    "title": "Runbooks operaționale: incident response, key compromise, revocare, backup/DR și recuperare după outage",
+    "component": "security",
+    "description": "Creați runbooks și proceduri operaționale implementabile pentru: compromitere chei, revocare masivă, dezactivare issuer, migrare urgentă, backup/restore DB, și recuperare după outage chain/Discovery.",
+    "objectives": [
+      "Timp de răspuns scurt în incident (pași clari și automatizabili)",
+      "Control de schimbare și audit pentru operațiile critice",
+      "DR plan pentru DB și secrete"
+    ],
+    "implementation_details": "1) Incident categories: (a) sentinel key compromise, (b) issuer compromise, (c) credential leakage, (d) discovery compromise, (e) chain outage. 2) Pentru fiecare: pași: detectare (alert rules), containment (disable issuer on-chain, revoke credentials, rotate keys), eradication (patch), recovery (reissue, restore), post-mortem. 3) Backup/DR: DB backups (RPO/RTO), secret backups (Vault snapshots), config artifacts, contract addresses. 4) Documentați „break-glass” access (TASK-023) și two-person rule pentru prod. 5) Includeți checklist de verificare după recovery: status stale, issuer status, service descriptor validity.",
+    "technical_requirements": [
+      "Audit logging (TASK-034)",
+      "RBAC + approvals (TASK-023/064)",
+      "Observability alerts (TASK-063)"
+    ],
+    "dependencies": [
+      "TASK-002",
+      "TASK-034",
+      "TASK-063",
+      "TASK-064",
+      "TASK-049"
+    ],
+    "security_considerations": [
+      "Runbooks incomplete duc la greșeli în incident; validați prin game days trimestrial",
+      "Break-glass poate fi abuzat; audit strict și rotație credențiale după folosire"
+    ],
+    "edge_cases": [
+      "Revocare masivă (mii credențiale): status list update trebuie să fie incremental și performant; planificați batching",
+      "Chain outage prelungit: definiți policy de degradare și comunicare internă către operatori"
+    ],
+    "acceptance_criteria": [
+      "Există runbooks scrise pentru toate categoriile de incident",
+      "Runbooks includ comenzi exacte (CLI/API) și verificări post-incident",
+      "Cel puțin un „tabletop exercise” este definit ca test de proces"
+    ]
+  }
+]

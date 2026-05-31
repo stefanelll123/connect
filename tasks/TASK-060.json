@@ -1,0 +1,84 @@
+{
+  "id": "TASK-060",
+  "title": "Discovery UI: Chain Dashboard + Audit Viewer (events, indexer lag, incidents, audit log export)",
+  "component": "discovery_ui/pages/chain_audit",
+  "status": "pending",
+  "description": "Implement the Chain Dashboard and Audit Viewer pages. The Chain Dashboard shows blockchain connectivity status, contract addresses, last processed block, indexer lag, and recent on-chain events. Alert flags highlight critical incidents (issuer disabled, emergency revoke). The Audit Viewer provides a searchable, filterable view of all Discovery Service audit events with paging, JSONL export, and tamper-detection indicator.",
+  "objectives": [
+    "Chain Dashboard: network/chainId, contract addresses, RPC status, last_block, indexer_lag, last_event_ts",
+    "Events view: table with event_type, tx_hash (truncated+link), block, actor_hash, payload summary",
+    "Alert flags: issuer_disabled_recently, status_stale_detected, emergency_revoke, indexer_lag_high",
+    "Audit Viewer: table with filters (actor, action, target, time range), pagination, streaming cursor",
+    "JSONL export: download audit events as JSONL file for offline analysis",
+    "Tamper detection: show indicator if audit hash chain verification fails"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      {
+        "step": 1,
+        "title": "Chain Dashboard status cards",
+        "detail": "File `src/pages/ChainPage.tsx`. API call: `GET /api/v1/chain/status` returns `{network_name, chain_id, rpc_endpoint_status: ok|unreachable|degraded, last_block: int, indexer_lag_blocks: int, last_event_ts: str, contract_addresses: {issuer_registry, trust_policy_registry, status_registry, service_registry}}`. Render as a 2-column grid of MUI `Card` components: (1) Network Info card: network_name, chain_id, RPC status chip. (2) Sync Status card: last_block, indexer_lag_blocks (color: green < 3, yellow 3-10, red > 10), last_event_ts. (3-6) Contract Cards: one per contract with address (truncated + copy button + Etherscan link if testnet). Auto-refresh every 30s using `setInterval` (clear on unmount)."
+      },
+      {
+        "step": 2,
+        "title": "Alert flags panel",
+        "detail": "API call: `GET /api/v1/chain/alerts` returns `{alerts: [{type, severity, message, triggered_at, resolved: bool}]}`. Render as MUI `Alert` banners at top of Chain page. Alert types and styling: `issuer_disabled` → severity=error, message includes issuer DID hash; `status_stale` → severity=warning; `emergency_revoke` → severity=error with `ErrorOutline` icon; `indexer_lag_high` → severity=warning. Include 'Acknowledge' button on each alert (calls `PATCH /api/v1/chain/alerts/{id}/acknowledge`). Acknowledged alerts collapse but remain visible in 'Recent alerts' collapsible section for audit trail. Critical alerts (error severity) also shown as a notification badge on the 'Chain' nav item in sidebar."
+      },
+      {
+        "step": 3,
+        "title": "Chain events table",
+        "detail": "Component `ChainEventsTable` in `src/components/chain/`. API call: `GET /api/v1/chain/events?event_type=&page=&page_size=20`. Columns: block (right-aligned), event_type chip, tx_hash (first 10 chars + external link to block explorer `https://sepolia.etherscan.io/tx/{tx_hash}` for testnet), actor_hash (8 chars + tooltip), payload_summary (JSON key preview, truncated to 100 chars). Event type chips: `IssuerRegistered` (blue), `IssuerRevoked` (red), `PolicyUpdated` (orange), `StatusAnchored` (green), `ServiceRegistered` (teal). Filter by event_type via checkbox group. Click row: expand to show full payload JSON (prettified, keys highlighted)."
+      },
+      {
+        "step": 4,
+        "title": "Audit Viewer page",
+        "detail": "File `src/pages/AuditPage.tsx`. API call: `GET /api/v1/audit/events?actor_did=&action=&target_id=&from_ts=&to_ts=&page=&page_size=50&format=json`. Filter controls row: actor_did text input, action multi-select (use AuditAction enum values from backend), target_id text, date range picker (MUI DateTimePicker). Results table: ts (absolute), action (chip colored by category: credential actions=blue, chain actions=orange, auth actions=red, config actions=grey), actor_did_hash (8 chars), target_id, env. Pagination with 'Load more' button (cursor-based: pass `cursor=last_event_hash` to next page). Total count shown in header: 'Showing 1-50 of 12,340 events'."
+      },
+      {
+        "step": 5,
+        "title": "JSONL export",
+        "detail": "Button 'Export JSONL' in Audit Viewer header. On click: calls `GET /api/v1/audit/events?{current_filters}&format=jsonl&stream=true` which returns NDJSON stream (per TASK-034). Use Fetch API with streaming body: `const reader = response.body.getReader()`, read chunks, concatenate into Blob, trigger download via `URL.createObjectURL`. Show progress indicator 'Downloading... N events'. IMPORTANT: limit export to 100,000 events per request (API enforces this too). If user's filters would return > 100,000: show warning 'Narrow your time range. Export is limited to 100,000 events.' before initiating download."
+      },
+      {
+        "step": 6,
+        "title": "Tamper detection indicator",
+        "detail": "Component `TamperDetectionStatus` in `src/components/audit/`. API call: `GET /api/v1/audit/tamper-check` returns `{status: ok|warning|error, last_verified_at, events_checked, broken_chain_at: str | null}`. Render in Audit page header as: (1) green shield icon if `status=ok`; (2) yellow warning icon if `status=warning` (unverified since > 1h) with message 'Hash chain not recently verified'; (3) red error icon if `status=error` with message 'Hash chain broken at event {broken_chain_at}. Contact security team immediately.' Refresh tamper check status every 5 minutes."
+      },
+      {
+        "step": 7,
+        "title": "Tests",
+        "detail": "Test files: `src/pages/__tests__/ChainPage.test.tsx` and `AuditPage.test.tsx`. Cases: (1) Chain status cards render with correct color for indexer lag; (2) Alert banner shows for issuer_disabled alert; (3) Acknowledge button calls correct API; (4) Chain events table renders with external Etherscan link; (5) Audit filter form submits search params to API; (6) JSONL export triggers file download; (7) Tamper check status renders correct icon for each status; (8) Pagination 'Load more' calls API with cursor parameter."
+      }
+    ]
+  },
+  "project_structure": {
+    "files": {
+      "discovery-ui/src/pages/ChainPage.tsx": "Chain dashboard with status cards and events",
+      "discovery-ui/src/pages/AuditPage.tsx": "Audit event viewer with filtering",
+      "discovery-ui/src/components/chain/ChainEventsTable.tsx": "Filterable chain events table",
+      "discovery-ui/src/components/chain/AlertsPanel.tsx": "Alert flags and acknowledge actions",
+      "discovery-ui/src/components/audit/AuditFiltersBar.tsx": "Filter controls for audit log",
+      "discovery-ui/src/components/audit/TamperDetectionStatus.tsx": "Hash chain integrity indicator",
+      "discovery-ui/src/api/chain.ts": "Chain API client functions",
+      "discovery-ui/src/api/audit.ts": "Audit API client functions with JSONL export",
+      "discovery-ui/src/pages/__tests__/ChainPage.test.tsx": "Chain page tests",
+      "discovery-ui/src/pages/__tests__/AuditPage.test.tsx": "Audit page tests"
+    }
+  },
+  "security_constraints": [
+    "Etherscan external links use `rel='noopener noreferrer'` to prevent tab hijacking",
+    "JSONL export is size-limited to prevent browser memory exhaustion from large downloads",
+    "Tamper detection error must not auto-dismiss — requires explicit admin acknowledgement",
+    "Audit filter inputs sanitized (no XSS via actor_did field) — API already escapes, UI uses textContent not innerHTML",
+    "Alert acknowledgement is logged as an audit event server-side — UI action is traceable"
+  ],
+  "dependencies": ["TASK-057", "TASK-031", "TASK-034"],
+  "acceptance_criteria": [
+    "Chain status cards show correct color-coded indexer lag indicator",
+    "Alert banners shown for active alerts, collapsible after acknowledgement",
+    "JSONL export successfully downloads and contains valid NDJSON",
+    "Tamper detection shows red error state when chain broken",
+    "Audit filter correctly queries API with all filter parameters",
+    "All 8 test cases pass"
+  ]
+}

@@ -1,0 +1,161 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — Governance Admin{% endblock %}
+{% block content %}
+
+<h4 class="mb-3 fw-bold">Dashboard</h4>
+
+<!-- Stat cards -->
+<div class="row g-3 mb-4">
+  <div class="col-6 col-md-3">
+    <a href="/issuers" class="text-decoration-none">
+      <div class="card text-center p-3 h-100">
+        <div class="fs-1 fw-bold text-primary">{{ stats.issuers }}</div>
+        <div class="text-muted small">Active Issuers</div>
+      </div>
+    </a>
+  </div>
+  <div class="col-6 col-md-3">
+    <a href="/policies" class="text-decoration-none">
+      <div class="card text-center p-3 h-100">
+        <div class="fs-1 fw-bold text-success">{{ stats.policies }}</div>
+        <div class="text-muted small">Active Policies</div>
+      </div>
+    </a>
+  </div>
+  <div class="col-6 col-md-3">
+    <a href="/services" class="text-decoration-none">
+      <div class="card text-center p-3 h-100">
+        <div class="fs-1 fw-bold text-info">{{ stats.services }}</div>
+        <div class="text-muted small">Registered Services</div>
+      </div>
+    </a>
+  </div>
+  <div class="col-6 col-md-3">
+    <a href="/audit" class="text-decoration-none">
+      <div class="card text-center p-3 h-100">
+        <div class="fs-1 fw-bold text-warning">{{ stats.audit }}</div>
+        <div class="text-muted small">Audit Entries</div>
+      </div>
+    </a>
+  </div>
+</div>
+
+<div class="row g-3">
+
+  <!-- Governance Key -->
+  <div class="col-lg-5">
+    <div class="card p-4 h-100">
+      <h6 class="fw-bold mb-3"><i class="bi bi-key-fill text-warning me-2"></i>Governance Key</h6>
+
+      <div class="mb-3">
+        <div class="text-muted small mb-1">Ethereum Address</div>
+        <div class="mono copyable" data-copy="{{ gov_key.address }}" title="Click to copy">{{ gov_key.address }}</div>
+      </div>
+
+      <div class="mb-3">
+        <div class="text-muted small mb-1">
+          Private Key
+          <span class="badge bg-danger ms-1">sensitive</span>
+          <span class="text-muted ms-1" style="font-size:.75em">hover to reveal &amp; click to copy</span>
+        </div>
+        <div class="mono blurred copyable" data-copy="{{ gov_key.private_key_hex }}" tabindex="0" title="Click to copy">{{ gov_key.private_key_hex }}</div>
+      </div>
+
+      <div class="mb-3">
+        <div class="text-muted small mb-2">Roles on contracts</div>
+        {% for role, has in roles.items() %}
+          {% if has %}
+            <span class="badge bg-success me-1 mb-1"><i class="bi bi-check-circle me-1"></i>{{ role }}</span>
+          {% else %}
+            <span class="badge bg-secondary me-1 mb-1"><i class="bi bi-x-circle me-1"></i>{{ role }}</span>
+          {% endif %}
+        {% endfor %}
+        {% set has_all = roles.values() | list | select | list | length == roles | length %}
+        {% if not has_all %}
+        <div class="mt-2">
+          <a href="/bootstrap" class="btn btn-sm btn-warning">
+            <i class="bi bi-key me-1"></i>Run Bootstrap to grant missing roles
+          </a>
+        </div>
+        {% endif %}
+      </div>
+
+      <div class="text-muted small mt-auto">Generated {{ gov_key.created_at[:19] }} UTC</div>
+    </div>
+  </div>
+
+  <!-- Contract Status -->
+  <div class="col-lg-7">
+    <div class="card p-4 h-100">
+      <h6 class="fw-bold mb-3">
+        <span class="status-dot {% if chain_ok %}dot-green{% else %}dot-red{% endif %} me-2"></span>
+        Smart Contracts
+        <span class="badge {% if chain_ok %}bg-success{% else %}bg-danger{% endif %} ms-2">
+          {% if chain_ok %}Chain Online{% else %}Chain Offline{% endif %}
+        </span>
+      </h6>
+      <table class="table table-sm mb-0">
+        <thead><tr><th>Contract</th><th>Address</th><th>Status</th></tr></thead>
+        <tbody>
+          {% for c in contracts %}
+          <tr>
+            <td class="fw-semibold">{{ c.name }}</td>
+            <td class="mono small">
+              {% if c.address %}{{ c.address }}{% else %}<span class="text-muted">not configured</span>{% endif %}
+            </td>
+            <td>
+              {% if c.deployed %}
+                <span class="badge bg-success"><i class="bi bi-check-circle me-1"></i>Deployed</span>
+              {% elif c.address %}
+                <span class="badge bg-warning text-dark"><i class="bi bi-exclamation-triangle me-1"></i>No bytecode</span>
+              {% else %}
+                <span class="badge bg-secondary">Not configured</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
+<!-- Recent Activity -->
+{% if recent_audit %}
+<div class="card mt-4 p-4">
+  <div class="d-flex align-items-center mb-3">
+    <h6 class="fw-bold mb-0"><i class="bi bi-clock-history me-2 text-secondary"></i>Recent Activity</h6>
+    <a href="/audit" class="ms-auto btn btn-sm btn-outline-secondary">View all</a>
+  </div>
+  <table class="table table-sm mb-0">
+    <thead><tr><th>Time</th><th>Action</th><th>Entity</th><th>Status</th><th>TX</th></tr></thead>
+    <tbody>
+      {% for e in recent_audit %}
+      <tr class="{% if e.status == 'error' %}table-danger{% endif %}">
+        <td class="small text-muted">{{ e.created_at[:19] }}</td>
+        <td><code class="small">{{ e.action }}</code></td>
+        <td class="small mono" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;" title="{{ e.entity_id or '' }}">
+          {% if e.entity_type %}<span class="badge bg-light text-dark border me-1">{{ e.entity_type }}</span>{% endif %}
+          {{ e.entity_id or '' }}
+        </td>
+        <td>
+          {% if e.status == 'success' %}
+            <span class="badge bg-success">ok</span>
+          {% else %}
+            <span class="badge bg-danger">error</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if e.tx_hash %}
+            <a href="http://localhost:5100/tx/{{ e.tx_hash }}" target="_blank" class="tx-link">{{ e.tx_hash[:14] }}…</a>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{% endblock %}

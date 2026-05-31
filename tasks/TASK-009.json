@@ -1,0 +1,135 @@
+{
+  "id": "TASK-009",
+  "title": "Monorepo Scaffold and Development Standardization (Formatting, Linting, Testing, Packaging) for Python + Frontend + Contracts",
+  "component": "infrastructure",
+  "status": "not-started",
+  "description": "Create the complete repository structure, code standards, and local development pipeline for all components: discovery-service (Python/FastAPI), sentinel (Python/FastAPI), shared libraries (Python), blockchain contracts (Solidity), and frontend (React/MUI). This task creates all scaffolding files — pyproject.toml, Makefile, pre-commit hooks, etc.",
+  "objectives": [
+    "Clear and unified repository structure for multiple engineering teams",
+    "Local reproducibility (make targets) with unified code standards",
+    "Clear separation between shared crypto libraries and application code"
+  ],
+  "implementation_guidance": {
+    "overview": "Set up a Python monorepo (not using a monorepo tool like nx for Python, but managed via workspace pyproject.toml and per-package pyproject.toml files). Use ruff for linting/formatting, mypy for type checking, pytest for testing. Use Vite for the React frontend. Use Hardhat for Solidity contracts.",
+    "steps": [
+      "Step 1 - Top-Level Directory Structure: Create the following top-level directories: /services (application services), /libs (shared libraries), /contracts (Solidity), /frontend (React UI), /docs (architecture/design docs), /scripts (utility scripts), /deploy (K8s/Helm/docker-compose), /tests (integration/e2e tests).",
+      "Step 2 - Services Directory Structure: /services/discovery/ — Discovery Service FastAPI application. /services/sentinel/ — Sentinel FastAPI application. Each service has the internal structure: src/{service_name}/ (source package), tests/ (unit + integration tests), pyproject.toml, Dockerfile, README.md.",
+      "Step 3 - Libs Directory Structure: /libs/common/ — shared Python library. Internal structure: src/common/crypto/ (DID key generation, JWS sign/verify, hashing), src/common/vc_schemas/ (Pydantic models for VC types — TASK-004), src/common/onboarding/ (enrollment token/proof — TASK-005), src/common/proof/ (ProofClaims — TASK-006), src/common/revocation/ (bitstring status list — TASK-007), src/common/secret_storage/ (SecretStorage interface — TASK-011), src/common/chain/ (web3.py client — TASK-020), src/common/telemetry/ (OTel utilities — TASK-012). Each sub-package has its own __init__.py and is importable independently.",
+      "Step 4 - Python Tooling Configuration (pyproject.toml per package): Use Python 3.11+. Each package has its own pyproject.toml with [build-system] using hatchling or setuptools. Base pyproject.toml at root configures: ruff (linting + formatting, replaces black+isort+flake8), mypy (strict mode for libs, non-strict for services allowed with justification), pytest with coverage (minimum 80% for libs). Key dependencies for services: fastapi>=0.111.0, uvicorn[standard]>=0.29.0, pydantic>=2.7.0, pydantic-settings>=2.2.0, sqlalchemy>=2.0.29 (async), alembic>=1.13.0, asyncpg>=0.29.0, httpx>=0.27.0, redis>=5.0.3, web3>=6.18.0, opentelemetry-sdk>=1.24.0, opentelemetry-instrumentation-fastapi>=0.45b0, prometheus-client>=0.20.0, cryptography>=42.0.0.",
+      "Step 5 - Ruff Configuration: In root pyproject.toml [tool.ruff]: line-length = 100, target-version = 'py311'. [tool.ruff.lint]: select = ['E','W','F','I','B','C4','UP','N','ANN','S','BLE','FBT','T20','SIM','ARG','PTH','PD','PL','TRY','PERF']. [tool.ruff.lint.per-file-ignores]: tests/** = ['S101','ANN']. This enforces security rules (S), type annotations (ANN), and common bug patterns.",
+      "Step 6 - Mypy Configuration: [tool.mypy]: python_version = '3.11', strict = true for libs, warn_return_any = true, disallow_untyped_defs = true. Create mypy.ini or use pyproject.toml. For services, allow: disallow_untyped_defs = false (with justification in PR).",
+      "Step 7 - Test Configuration: [tool.pytest.ini_options]: testpaths = ['tests'], asyncio_mode = 'auto', addopts = '--cov=src --cov-report=html --cov-fail-under=80'. Use pytest-asyncio for async tests, pytest-httpx for HTTPX mocking, freezegun for time mocking.",
+      "Step 8 - Makefile: Create root Makefile with targets: install (pip install all packages in dev mode), lint (run ruff check on all), format (ruff format + ruff check --fix), type-check (run mypy on all), test (run pytest for all packages), test-unit (unit tests only), test-integration (integration tests only, requires docker-compose), build (build all Docker images), up (docker compose up), down (docker compose down), seed (run seed script), reset (docker compose down -v && docker compose up -d). Each target should work from the root directory.",
+      "Step 9 - Pre-commit Hooks: Create .pre-commit-config.yaml with hooks: ruff (check + format), mypy (libs only), detect-secrets (block secret patterns), check-yaml, check-json, end-of-file-fixer, trailing-whitespace. Install with pre-commit install.",
+      "Step 10 - Node/React Tooling: /frontend/discovery-ui/: package.json with React 18, @mui/material 5.x, Vite 5.x, TypeScript 5.x, eslint with typescript-eslint and react hooks rules, prettier. Scripts: dev, build, lint, type-check, test (vitest + @testing-library/react).",
+      "Step 11 - Solidity Tooling: /contracts/package.json with hardhat@2.22.x, @openzeppelin/contracts@5.x, @nomicfoundation/hardhat-toolbox. npx hardhat test for unit tests. hardhat.config.ts with network configs.",
+      "Step 12 - .gitignore: Include __pycache__, *.pyc, .env, .env.*, *.key.enc, *private_key*, node_modules, dist, build, .venv, .mypy_cache, .ruff_cache, coverage/, htmlcov/, deployments/ (create deployments/.gitignore: !*.json to allow ABI artifacts only, no private keys).",
+      "Step 13 - Versioning: libs/common uses semantic versioning. Version defined in libs/common/pyproject.toml. Services declare dependency as common>=0.x.y. Internal API schema versioning: /api/v1/... prefix on all endpoints. Breaking changes in common libs require major version bump."
+    ],
+    "project_structure": {
+      "root_structure": {
+        ".github/": "CI/CD workflow files",
+        ".pre-commit-config.yaml": "Pre-commit hooks configuration",
+        "Makefile": "Development targets",
+        "pyproject.toml": "Root Python tooling config (ruff, mypy, pytest settings)",
+        "docker-compose.yaml": "Local development environment",
+        "docker-compose.test.yaml": "Test overrides",
+        "services/": {
+          "discovery/": {
+            "src/discovery/": "Source package",
+            "tests/": "Tests",
+            "pyproject.toml": "",
+            "Dockerfile": "",
+            "README.md": ""
+          },
+          "sentinel/": {
+            "src/sentinel/": "Source package",
+            "sentinelctl/": "CLI commands",
+            "tests/": "",
+            "pyproject.toml": "",
+            "Dockerfile": "",
+            "README.md": ""
+          }
+        },
+        "libs/": {
+          "common/": {
+            "src/common/": {
+              "crypto/": "",
+              "vc_schemas/": "",
+              "onboarding/": "",
+              "proof/": "",
+              "revocation/": "",
+              "secret_storage/": "",
+              "chain/": "",
+              "telemetry/": ""
+            },
+            "tests/": "",
+            "pyproject.toml": ""
+          }
+        },
+        "contracts/": {
+          "contracts/": "Solidity source files",
+          "scripts/": "Deploy scripts",
+          "test/": "Hardhat tests",
+          "deployments/": "ABI + address artifacts (committed)",
+          "hardhat.config.ts": "",
+          "package.json": ""
+        },
+        "frontend/": {
+          "discovery-ui/": {
+            "src/": "React source",
+            "public/": "",
+            "package.json": "",
+            "vite.config.ts": "",
+            "tsconfig.json": ""
+          }
+        },
+        "docs/": "Architecture and design documents",
+        "deploy/": {
+          "helm/": "Helm charts",
+          "k8s/": "Raw manifests"
+        },
+        "tests/": {
+          "e2e/": "End-to-end test scenarios",
+          "integration/": "Cross-service integration tests"
+        },
+        "scripts/": {
+          "seed.py": "Local dev seed script",
+          "reset.sh": "Reset local environment"
+        }
+      }
+    },
+    "security_constraints": [
+      "detect-secrets pre-commit hook MUST be installed to prevent accidental secret commits",
+      ".gitignore MUST exclude all *.env files, private key files, and any file matching *secret* or *private*",
+      "Supply chain: all Python packages use exact pinned versions in lockfiles (pip-compile or poetry.lock)",
+      "Node packages use package-lock.json with npm ci in CI",
+      "No development/test credentials may be committed — use .env.example with placeholder values only"
+    ]
+  },
+  "technical_requirements": [
+    "Python 3.11+",
+    "FastAPI >= 0.111.0",
+    "Pydantic v2",
+    "pytest + pytest-asyncio + pytest-cov",
+    "ruff >= 0.4.0",
+    "mypy >= 1.10.0",
+    "Node.js 20+",
+    "React 18 + Material UI 5",
+    "Vite 5",
+    "Hardhat 2.22+"
+  ],
+  "dependencies": [
+    "TASK-001",
+    "TASK-003"
+  ],
+  "acceptance_criteria": [
+    "make test runs all unit tests from repository root and passes",
+    "make lint runs ruff on all Python sources and reports no errors",
+    "make type-check runs mypy on libs/common and reports no errors",
+    "Directory structure matches the specification exactly",
+    "Pre-commit hooks are installed and block commits containing secrets",
+    "libs/common is importable by both discovery and sentinel services",
+    "All pyproject.toml files are valid and installable with pip install -e"
+  ]
+}

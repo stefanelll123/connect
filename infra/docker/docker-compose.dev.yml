@@ -1,0 +1,64 @@
+# docker-compose.dev.yml — local development overlay
+# Usage: docker compose -f docker-compose.yaml -f infra/docker/docker-compose.dev.yml up
+#
+# Overrides and extends the base docker-compose.yaml with:
+#   - discovery-ui service (React/Vite → nginx)
+#   - sentinel home volumes for each sentinel instance
+#   - Development environment overrides (auth disabled, hot-reload)
+
+services:
+  # ── Discovery UI ──────────────────────────────────────────────────────────
+  discovery-ui:
+    build:
+      context: ../..
+      dockerfile: infra/docker/discovery-ui/Dockerfile
+    ports:
+      - "3000:8080"
+    environment:
+      # Injected at build-time via nginx config; overrideable at runtime
+      # via window._env_ pattern or .env file
+      VITE_API_BASE_URL: "http://localhost:8000"
+      VITE_OIDC_AUTHORITY: "http://localhost:8080/realms/discovery"
+      VITE_OIDC_CLIENT_ID: "discovery-ui-dev"
+    depends_on:
+      discovery:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - sentinel_net
+
+  # ── Discovery Service overrides ───────────────────────────────────────────
+  discovery:
+    environment:
+      # Enable development-mode CORS (allow localhost:3000)
+      DISCOVERY_CORS_ORIGINS: "http://localhost:3000,http://localhost:5173"
+      DEPLOYMENT_ENVIRONMENT: dev
+
+  # ── Sentinel Producer overrides ───────────────────────────────────────────
+  sentinel-producer:
+    environment:
+      SENTINEL_UI_ENABLED: "true"
+      SENTINEL_UI_AUTH: "none"
+      DEPLOYMENT_ENVIRONMENT: dev
+    volumes:
+      - sentinel-home-producer:/sentinel-home
+
+  # ── Sentinel Consumer overrides ───────────────────────────────────────────
+  sentinel-consumer:
+    environment:
+      SENTINEL_UI_ENABLED: "true"
+      SENTINEL_UI_AUTH: "none"
+      DEPLOYMENT_ENVIRONMENT: dev
+    volumes:
+      - sentinel-home-consumer:/sentinel-home
+
+volumes:
+  sentinel-home-producer:
+    name: sentinel-home-producer
+  sentinel-home-consumer:
+    name: sentinel-home-consumer

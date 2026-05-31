@@ -1,0 +1,142 @@
+{
+  "id": "TASK-045",
+  "title": "Sentinel: Producer Inbound Pipeline (verify proof, verify VP/VC, trust checks, policy eval, forward to backend)",
+  "component": "sentinel/producer/pipeline",
+  "status": "pending",
+  "description": "Implement the complete producer-side inbound request verification pipeline. Every incoming request from a consumer sentinel must pass through an 8-stage verification pipeline before being forwarded to the backend service. The pipeline enforces: request size/timeout limits, ProofClaims signature and binding verification, VP/VC cryptographic verification, issuer trust checks (via TrustLayerClient), revocation freshness (via RevocationManager), policy evaluation (ABAC), and finally header scrubbing before forwarding. On permit, forward. On deny, return structured 401/403 with only an error code and request_id — never leak internal claim details.",
+  "objectives": [
+    "Implement catch-all route /{full_path:path} for all HTTP methods on producer sentinel",
+    "8-stage pipeline: size/timeout → extract headers → verify proof → verify VP/VC → trust checks → revocation → policy → forward",
+    "On permit: scrub SentinelProof and SentinelVP headers before forwarding to backend",
+    "On deny: return 401/403 with {error: <code>, request_id: <trace_id>} only",
+    "Log every decision with: decision, trace_id, jti_hash (SHA-256 truncated to 16 chars), consumer_did_hash (SHA-256 truncated to 16 chars), service_id, latency_ms",
+    "Emit Prometheus metrics: inbound_requests_total{decision}, pipeline_stage_latency_seconds{stage}"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      {
+        "step": 1,
+        "title": "Register the catch-all inbound route",
+        "detail": "In `sentinel/producer/routes/inbound.py`: `@router.api_route('/{full_path:path}', methods=['GET','POST','PUT','PATCH','DELETE','OPTIONS','HEAD'])`. Handler receives `request: Request` and `full_path: str`. Instantiate `InboundPipeline` (injected via dependency) and call `await pipeline.process(request, full_path)`. Return the pipeline result as a `Response` object (either forwarded backend response or deny response)."
+      },
+      {
+        "step": 2,
+        "title": "Stage 1: Request size and timeout enforcement",
+        "detail": "Read `Content-Length` header. If present and > 2MB: immediately return 413 `{error: 'REQUEST_TOO_LARGE'}` without reading body. If absent (chunked), read body up to 2MB + 1 byte; if exceeded, return 413. Set a stage timeout: if any stage takes > `PIPELINE_STAGE_TIMEOUT_SECONDS` (default 10s), cancel and return 504 `{error: 'PIPELINE_TIMEOUT'}`. Use `asyncio.wait_for` around the entire pipeline (excluding network I/O to backend)."
+      },
+      {
+        "step": 3,
+        "title": "Stage 2: Extract security headers",
+        "detail": "Extract: `authorization = request.headers.get('Authorization', '')`. Check prefix `'SentinelProof '`. If missing or wrong prefix: return 401 `{error: 'MISSING_PROOF'}`. Extract `vp_jwt = request.headers.get('SentinelVP', '')`. If missing: return 401 `{error: 'MISSING_VP'}`. Extract `correlation_id = request.headers.get('X-Correlation-ID', generate_uuid())`. Body bytes are already read in Stage 1 — pass them through. Do not at this stage validate the JWT structure — that happens in Stage 3."
+      },
+      {
+        "step": 4,
+        "title": "Stage 3: Verify ProofClaims (signature, temporal, binding)",
+        "detail": "Call `await ProofVerifier.verify(proof_jwt, expected_aud=self.service_did, expected_env=self.env, resolver=resolver, trust_client=trust_client, replay_cache=replay_cache)`. This performs: (a) JWT decode + sig verify, (b) exp/iat temporal check with max_clock_skew from PolicyParams, (c) aud and env binding, (d) body_hash recomputation over body bytes from Stage 1, (e) query_hash recomputation from request URL, (f) jti replay cache check-and-insert. On any failure, return 401 with the specific error code from `ProofErrorCode`. On success, receive `VerificationContext(consumer_did, jti, proof_claims)`."
+      },
+      {
+        "step": 5,
+        "title": "Stage 4: Verify VP and VCs",
+        "detail": "Call `await verify_vp(vp_jwt, expected_aud=self.service_did, expected_nonce=proof.jti, expected_env=self.env, resolver=resolver, trusted_issuer_dids=trusted_dids_set)`. The `trusted_dids_set` is fetched from TrustLayerClient's issuer cache (all active issuers). Verify: (a) VP JWS signature, (b) aud == service_did, (c) nonce == proof.jti (VP bound to this exact request), (d) Each VC in VP: signature valid, not expired, issuer trusted. On failure: return 401 `{error: 'VP_INVALID'}` or `{error: 'VP_VC_INVALID'}` based on failure source. On success, receive `VerifiedPresentation` with list of `VerifiedCredential`."
+      },
+      {
+        "step": 6,
+        "title": "Stage 5: Issuer trust checks via TrustLayerClient",
+        "detail": "For each VC in the verified presentation: call `await trust_client.is_issuer_trusted(vc.issuer_did, schema_id=vc.credential_type[0])`. If any VC has an untrusted issuer: return 401 `{error: 'ISSUER_NOT_TRUSTED'}`. If TrustLayerClient raises TrustLayerUnavailable: apply local fail-closed — return 503 `{error: 'TRUST_LAYER_UNAVAILABLE', request_id}`. This is a transient error; consumer should retry. Do NOT permit the request through if trust cannot be verified."
+      },
+      {
+        "step": 7,
+        "title": "Stage 6: Revocation freshness check",
+        "detail": "For each VC with a `credentialStatus` field: call `await revocation_manager.check(vc.jti, status_list_id, status_list_index)` (TASK-046). RevocationManager enforces Δ-bounded freshness — if status data is stale beyond Δ, it returns a staleness policy decision. If any VC is revoked: return 401 `{error: 'VC_REVOKED'}`. If RevocationManager returns staleness violation and policy is fail-closed: return 503 `{error: 'REVOCATION_STATUS_STALE'}`. If policy is degrade: continue but set `stale_revocation=True` flag in context for audit log."
+      },
+      {
+        "step": 8,
+        "title": "Stage 7: Policy evaluation (ABAC)",
+        "detail": "Call `policy_engine.evaluate(resource=full_path, method=request.method, env=self.env, consumer_did=consumer_did, vcs=verified_vcs)` (TASK-047). Returns `PolicyDecision(permit=bool, rule_id=str, missing_scopes=list, reason=str)`. On Deny: log the `rule_id` and `missing_scopes` internally (NOT in response). Return 403 `{error: 'POLICY_DENY', request_id}`. On Permit: proceed to Stage 8."
+      },
+      {
+        "step": 9,
+        "title": "Stage 8: Forward to backend and return response",
+        "detail": "Construct forwarded request: copy all headers from original, REMOVE `Authorization` (SentinelProof), `SentinelVP`, and `X-Internal-*` headers. Add `X-Sentinel-Consumer-DID-Hash` (first 16 chars of SHA-256 of consumer_did — not the full DID), `X-Sentinel-Request-ID` (correlation_id), `X-Sentinel-Env` (env). Forward to `BACKEND_URL + '/' + full_path` using shared HTTPX client with timeout `BACKEND_TIMEOUT_SECONDS` (default 30s). Stream response body back. On backend error (5xx): return 502 to consumer. On backend timeout: return 504."
+      },
+      {
+        "step": 10,
+        "title": "Structured logging and metrics",
+        "detail": "After every request (permit or deny), emit a structured log: `{ts, decision: permit|deny, error_code, trace_id, jti_hash: sha256(jti)[:16], consumer_did_hash: sha256(consumer_did)[:16], service_id, path, method, latency_ms, stage_when_denied, stale_revocation}`. Never log full jti, full consumer_did, or VC content. Prometheus: `inbound_requests_total{decision, error_code}` Counter, `pipeline_stage_duration_seconds{stage}` Histogram, `inbound_request_size_bytes` Histogram. OTel span `sentinel.inbound_pipeline` with attributes matching log fields."
+      }
+    ]
+  },
+  "project_structure": {
+    "files": {
+      "sentinel/producer/routes/inbound.py": "Catch-all FastAPI route",
+      "sentinel/producer/pipeline.py": "InboundPipeline orchestrator with 8 stages",
+      "sentinel/producer/pipeline_context.py": "PipelineContext dataclass threading state through stages",
+      "tests/integration/producer/test_inbound_pipeline.py": "Full pipeline integration tests"
+    }
+  },
+  "data_structures": {
+    "pipeline_context": {
+      "request_id": "uuid",
+      "consumer_did": "string (populated after stage 3)",
+      "jti": "string (populated after stage 3)",
+      "verified_vcs": "list[VerifiedCredential] (populated after stage 4)",
+      "trust_checked": "bool",
+      "revocation_checked": "bool",
+      "stale_revocation": "bool",
+      "policy_rule_id": "string (populated after stage 7)",
+      "stage_timings": "dict[str, float] (ms per stage)"
+    },
+    "deny_response": {
+      "error": "POLICY_DENY",
+      "request_id": "trace-uuid"
+    },
+    "audit_log_entry": {
+      "ts": "ISO8601",
+      "decision": "permit|deny",
+      "error_code": "null or string",
+      "trace_id": "string",
+      "jti_hash": "first 16 chars SHA-256",
+      "consumer_did_hash": "first 16 chars SHA-256",
+      "service_id": "string",
+      "path": "string",
+      "method": "string",
+      "latency_ms": 12,
+      "stage_when_denied": "stage_name or null"
+    }
+  },
+  "error_handling": [
+    {"code": "MISSING_PROOF", "status": 401, "stage": 2},
+    {"code": "MISSING_VP", "status": 401, "stage": 2},
+    {"code": "SIGNATURE_INVALID", "status": 401, "stage": 3},
+    {"code": "PROOF_EXPIRED", "status": 401, "stage": 3},
+    {"code": "CLOCK_SKEW_EXCEEDED", "status": 401, "stage": 3},
+    {"code": "BODY_HASH_MISMATCH", "status": 401, "stage": 3},
+    {"code": "REPLAY_DETECTED", "status": 401, "stage": 3},
+    {"code": "VP_INVALID", "status": 401, "stage": 4},
+    {"code": "VP_VC_INVALID", "status": 401, "stage": 4},
+    {"code": "ISSUER_NOT_TRUSTED", "status": 401, "stage": 5},
+    {"code": "TRUST_LAYER_UNAVAILABLE", "status": 503, "stage": 5},
+    {"code": "VC_REVOKED", "status": 401, "stage": 6},
+    {"code": "REVOCATION_STATUS_STALE", "status": 503, "stage": 6},
+    {"code": "POLICY_DENY", "status": 403, "stage": 7},
+    {"code": "REQUEST_TOO_LARGE", "status": 413, "stage": 1},
+    {"code": "PIPELINE_TIMEOUT", "status": 504, "stage": "any"}
+  ],
+  "security_constraints": [
+    "SentinelProof and SentinelVP headers MUST be removed before forwarding to backend — backend must never see raw JWT material",
+    "Deny responses MUST NOT include claim values, VC content, or consumer DID in response body",
+    "body_hash MUST be recomputed over the exact bytes received — no normalization before hashing",
+    "Replay cache check (jti) MUST complete before VP verification to fail-fast on replays",
+    "Stage timeouts prevent slow-consumer DoS — backend call timeout is separate from pipeline timeout",
+    "Consumer DID hash in forwarded header uses only first 16 chars to prevent full DID reconstruction"
+  ],
+  "dependencies": ["TASK-041", "TASK-042", "TASK-043", "TASK-046", "TASK-047", "TASK-037"],
+  "acceptance_criteria": [
+    "All 8 pipeline stages execute in correct order with correct error codes on failure",
+    "Backend receives request without SentinelProof/SentinelVP headers",
+    "Replay of same proof (jti) is rejected on second attempt",
+    "Policy deny returns 403 with no VC claim details in response",
+    "Structured decision log emitted for every request (permit and deny)",
+    "Pipeline completes valid requests in under 20ms (excluding backend I/O)"
+  ]
+}

@@ -1,0 +1,87 @@
+{
+  "id": "TASK-024",
+  "title": "Discovery Service API: Application and Service Registration (Service Registry Core)",
+  "component": "discovery-service",
+  "status": "not-started",
+  "description": "Implement the CRUD API endpoints for registering and managing applications and services in the Discovery Service. Applications are top-level organizational units; services represent deployable components within an app. Services have a (service_id, env) unique identity and can be associated with producer/consumer sentinels.",
+  "objectives": [
+    "Deterministic register/update/deactivate API for services with strict validation",
+    "Audit log for all mutations",
+    "Optional blockchain integration: publish service binding to ServiceRegistry on-chain"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      "Step 1 - Apps Endpoints: POST /api/v1/apps (create), GET /api/v1/apps (list, paginated), GET /api/v1/apps/{app_id}, PATCH /api/v1/apps/{app_id} (update display_name/owner), DELETE /api/v1/apps/{app_id} → deactivate (soft delete). Requires operator role.",
+      "Step 2 - Services Endpoints: POST /api/v1/services (create), GET /api/v1/services (list with filters: env, app_id, is_active), GET /api/v1/services/{service_id_or_uuid}, PATCH /api/v1/services/{id} (update display_name, description only), POST /api/v1/services/{id}/deactivate. Requires operator role.",
+      "Step 3 - Request/Response Models (Pydantic v2): CreateServiceRequest: app_id (UUID), service_id (str, max 64 chars, regex ^[a-z0-9-_]+$), env (Literal['dev','test','prod']), display_name (str), description (str, optional), owner_did (str, optional). ServiceResponse: all fields plus id, created_at, sentinel_count.",
+      "Step 4 - service_id Validation: service_id MUST match ^[a-z0-9][a-z0-9\\-_]{1,62}[a-z0-9]$ (lowercase alphanumeric, hyphens, underscores; no leading/trailing hyphens). service_id is immutable after creation — PATCH cannot modify it. Return 409 if already exists.",
+      "Step 5 - Pagination: All list endpoints accept cursor (base64 encoded last ID) and limit (max 100, default 20). Response includes next_cursor and total_count.",
+      "Step 6 - Blockchain Integration (optional, BLOCKCHAIN_INTEGRATION=true): After service creation, call ServiceRegistryClient.register_service(). Store tx_receipt in services table (tx_hash column). If chain fails: log warning, mark chain_sync_pending=true. A background retry worker picks up pending services.",
+      "Step 7 - Deactivation Logic: POST /api/v1/services/{id}/deactivate: (a) set is_active=false, (b) trigger sentinel decommission for all associated active sentinels (emit internal event), (c) write audit event. Requires security-admin role (not just operator).",
+      "Step 8 - Input Sanitization: All string fields sanitized: strip surrounding whitespace, reject null bytes, URL fields validated with Pydantic AnyHttpUrl. description max 2000 chars. No HTML allowed in any text field."
+    ],
+    "api_endpoints": [
+      {
+        "method": "POST",
+        "path": "/api/v1/services",
+        "auth": "operator",
+        "request": {
+          "app_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+          "service_id": "billing-api",
+          "env": "prod",
+          "display_name": "Billing API Service",
+          "description": "Handles billing and payment processing"
+        },
+        "response_201": {
+          "id": "c2b8f6a0-...",
+          "service_id": "billing-api",
+          "env": "prod",
+          "is_active": true,
+          "created_at": "2024-01-15T10:00:00Z"
+        }
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/services",
+        "auth": "viewer",
+        "query_params": {"env": "prod", "limit": 20, "cursor": "optional"},
+        "response_200": {
+          "items": [],
+          "total_count": 0,
+          "next_cursor": null
+        }
+      }
+    ],
+    "error_handling": {
+      "error_codes": [
+        {"code": "SERVICE_ALREADY_EXISTS", "http": 409, "description": "service_id + env combination already registered"},
+        {"code": "APP_NOT_FOUND", "http": 404, "description": "app_id does not exist"},
+        {"code": "SERVICE_NOT_FOUND", "http": 404, "description": "Service ID not found"},
+        {"code": "SERVICE_ID_IMMUTABLE", "http": 400, "description": "Attempt to change service_id via PATCH"},
+        {"code": "INVALID_SERVICE_ID", "http": 422, "description": "service_id does not match allowed pattern"}
+      ]
+    },
+    "security_constraints": [
+      "service_id regex validation prevents injection characters",
+      "owner_did field not validated for DID format at this layer — validated during onboarding",
+      "URL fields in metadata validated with Pydantic to prevent SSRF payload storage",
+      "Deactivation requires security-admin role — operator cannot deactivate"
+    ]
+  },
+  "technical_requirements": [
+    "FastAPI, Pydantic v2",
+    "SQLAlchemy 2.0 async (TASK-022 models)",
+    "Optional: blockchain client (TASK-020)"
+  ],
+  "dependencies": [
+    "TASK-023"
+  ],
+  "acceptance_criteria": [
+    "POST /api/v1/services creates service, returns 201 with service object",
+    "Duplicate service_id+env returns 409",
+    "GET /api/v1/services?env=prod returns only prod services",
+    "Cursor-based pagination works correctly",
+    "Audit event written for every POST/PATCH/deactivate",
+    "service_id with invalid characters returns 422"
+  ]
+}

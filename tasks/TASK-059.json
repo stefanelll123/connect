@@ -1,0 +1,75 @@
+{
+  "id": "TASK-059",
+  "title": "Discovery UI: Credential and Revocation Management (issue wizard, revoke, status lists, key rotation)",
+  "component": "discovery_ui/pages/credentials_revocations",
+  "status": "pending",
+  "description": "Implement the Credentials and Revocations management pages. The Credentials page lists all issued credentials with type, issuer, subject_did, aud, env, expiry, and status. An Issue Wizard guides the admin through selecting consumer sentinel, producer service, scopes, and expiry. The Revoke action enforces two-step confirmation in prod. The Status Lists page shows published BitString Status Lists with statistics (no raw bitstring). Rotation endpoints trigger re-issuance with grace period.",
+  "objectives": [
+    "Credentials page: table with credential_id (truncated), type, issuer_did_hash, subject_did_hash, aud, env, exp, status",
+    "Issue Wizard: 4-step form (select consumer sentinel, select producer service, select scopes, set expiry, confirm)",
+    "Revoke action with two-step confirmation in prod (reason + severity required)",
+    "Status Lists page: list statusListId, updatedAt, anchorHash (truncated), revoked_count statistics",
+    "Key rotation trigger: re-issue credentials for a sentinel after key rotation with grace window display",
+    "Links to relevant audit events on each credential/status list"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      {
+        "step": 1,
+        "title": "Credentials page implementation",
+        "detail": "File `src/pages/CredentialsPage.tsx`. API call: `GET /api/v1/credentials?env=&status=&type=&subject_did=&page=`. Columns: credential_id (first 12 chars + tooltip), type (chip), subject_did_hash (8 chars + tooltip with full hash), aud (truncated), env, exp (relative time + absolute tooltip), status chip. Filter controls: env, status (active/deprecated/expired/revoked), type. For each row: actions column with 'Revoke' button (disabled if already revoked/expired) and 'View Details' button. Details expand panel: shows issuer_did_hash, jti, statusListId+index, raw_jwt_hash (SHA-256 of JWT, NOT the JWT itself). Never display the raw VC JWT."
+      },
+      {
+        "step": 2,
+        "title": "Issue Wizard (4-step stepper)",
+        "detail": "Component `IssueCredentialWizard` in `src/components/credentials/`. Use MUI Stepper. Step 1 — Select Consumer: searchable dropdown of active sentinels filtered by role=consumer. Shows sentinel DID hash and service_id. Step 2 — Select Producer Service: searchable dropdown of active services. Auto-filters to env matching consumer. Step 3 — Configure: multi-select chips for `scopes` (load from service descriptor or predefined list), `expiry_days` number input (default 90, max 365), `credential_type` select (identity/service_binding/access_grant). Step 4 — Confirm: summary table of all selections + warning banner for prod environment. Submit: `POST /api/v1/credentials` — on success, show 'Credential issued. ID: {id}' snackbar and close wizard."
+      },
+      {
+        "step": 3,
+        "title": "Revoke action with two-step confirmation",
+        "detail": "Component `RevokeCredentialDialog` in `src/components/credentials/`. Props: `credentialId, env, type`. For non-prod: single dialog with `reason` text field (required, min 10 chars) + submit. For prod (`env === 'prod'`): two-step flow. Step 1: reason + severity dropdown (low/medium/high/critical). Step 2 (only if severity >= high): secondary confirmation — display `'Confirm revocation by typing the credential ID prefix: {credentialId[:12]}'`, text input must match exactly (constant-time compare on submit). This prevents accidental revocation of prod credentials. API call: `POST /api/v1/credentials/{id}/revoke` with body `{reason, severity}`. Show confirmation snackbar with: 'Credential revoked. Status list will update within 60 seconds.'"
+      },
+      {
+        "step": 4,
+        "title": "Status Lists page",
+        "detail": "File `src/pages/RevocationsPage.tsx`. Two tabs: 'Credentials' (revoked credential list) and 'Status Lists' (StatusList credential view). Status Lists tab: API call `GET /api/v1/status-lists?page=`. Columns: status_list_id, issued_for_env, total_entries (# credentials), revoked_count, active_count, last_published_at (relative), anchor_hash (first 12 chars). No bitstring displayed. Click row: open drawer showing: sequential index allocation stats, credential entries (id hash + revoked boolean, no full VC). Link to relevant chain event (anchor tx_hash). Refresh button triggers manual re-fetch (rate-limited once/min by UI)."
+      },
+      {
+        "step": 5,
+        "title": "Credential rotation support",
+        "detail": "When a sentinel rotates its DID key (TASK-039), its existing credentials become invalid (issued to old DID). The Discovery admin must re-issue. Trigger from UI in SentinelDetailDrawer (TASK-058): 'Re-issue Credentials' button appears when sentinel has `rotation_pending=true` flag. Opens dialog showing: old DID (hash), new DID (hash), grace period remaining, credentials affected count. On confirm: `POST /api/v1/sentinels/{id}/reissue-credentials`. Shows progress: 'Issuing N credentials...' with a spinner and counter. On complete: 'N credentials issued for new DID. Old credentials valid until {deprecated_until}'."
+      },
+      {
+        "step": 6,
+        "title": "Tests",
+        "detail": "Test files: `src/pages/__tests__/CredentialsPage.test.tsx` and `RevocationsPage.test.tsx`. Cases: (1) Credentials table renders with status chips; (2) Issue wizard progresses through 4 steps; (3) Step 3 scope selection displays available scopes; (4) Prod revoke requires two-step confirmation; (5) Non-prod revoke requires only reason field; (6) Credential ID confirmation field must match exactly for high-severity revoke; (7) Status lists page renders summary statistics; (8) Never renders raw VC JWT in any view."
+      }
+    ]
+  },
+  "project_structure": {
+    "files": {
+      "discovery-ui/src/pages/CredentialsPage.tsx": "Credentials table with issue/revoke actions",
+      "discovery-ui/src/pages/RevocationsPage.tsx": "Status lists and revoked credentials view",
+      "discovery-ui/src/components/credentials/IssueCredentialWizard.tsx": "4-step issue wizard",
+      "discovery-ui/src/components/credentials/RevokeCredentialDialog.tsx": "Two-step revoke dialog",
+      "discovery-ui/src/api/credentials.ts": "Typed API client for credential operations",
+      "discovery-ui/src/pages/__tests__/CredentialsPage.test.tsx": "Credential page tests",
+      "discovery-ui/src/pages/__tests__/RevocationsPage.test.tsx": "Revocation page tests"
+    }
+  },
+  "security_constraints": [
+    "Raw VC JWT must never be rendered in the UI — display only hashes and summary metadata",
+    "Two-step revocation confirmation for prod prevents accidental mass revocation",
+    "Credential ID confirmation input prevents scripted bulk revocation attacks",
+    "subject_did shown only as truncated hash (8 chars) in tables — full DID available on API but not displayed by default",
+    "Issue Wizard must validate scope selection against service descriptor — prevent issuing non-existent scopes"
+  ],
+  "dependencies": ["TASK-057", "TASK-028", "TASK-030", "TASK-031"],
+  "acceptance_criteria": [
+    "Issue Wizard completes 4 steps and submits correctly to API",
+    "Revoke dialog requires two-step for prod high-severity revocation",
+    "Status list page shows statistics (revoked_count, total) without bitstring",
+    "Raw VC JWT never appears in any rendered HTML in any test",
+    "All 8 test cases pass"
+  ]
+}

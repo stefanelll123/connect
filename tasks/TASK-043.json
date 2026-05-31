@@ -1,0 +1,124 @@
+{
+  "id": "TASK-043",
+  "title": "Sentinel: Request Security Envelope (ProofClaims builder, JWS signing, VP attachment, replay cache integration)",
+  "component": "sentinel/libs/common/security_envelope",
+  "status": "pending",
+  "description": "Implement the full request security envelope for Sentinel-to-Sentinel communication. The consumer side builds a ProofClaims object (capturing query_hash, body_hash, iat/exp, jti, aud, env), signs it as JWS with the consumer's DID key, and attaches a VP in a separate header. The producer side verifies the proof signature, validates temporal claims, recomputes body_hash, checks aud/env binding, and consults the replay cache before forwarding to backend. This is the core security mechanism enforcing cryptographic proof-of-possession for every inter-sentinel request.",
+  "objectives": [
+    "Implement ProofClaimsBuilder: compute body_hash (SHA-256, streaming-safe), query_hash, unique jti, iat, exp",
+    "Sign ProofClaims as compact JWS (EdDSA/ES256) using consumer DID key → Authorization: SentinelProof <jws>",
+    "Attach VP as SentinelVP header (base64url-encoded compact JWT-VP)",
+    "Implement producer-side ProofVerifier: verify JWS sig, validate temporal window, recompute body_hash, verify aud/env, check jti against replay cache",
+    "Integrate with Redis replay cache (atomic check-and-set with TTL = exp - iat + max_clock_skew)",
+    "Define all error codes and ensure deny responses contain no sensitive internal details"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      {
+        "step": 1,
+        "title": "Define ProofClaims payload structure",
+        "detail": "The signed payload (JWT claims) must contain: `jti` (UUID v4, unique per request), `iat` (current Unix timestamp float), `exp` (iat + proof_ttl_seconds, default 60), `aud` (producer service DID, must match ServiceDescriptor.service_did), `env` (deployment environment string, e.g. 'prod'), `htm` (HTTP method uppercase, e.g. 'POST'), `htu` (full request URL without query string), `qsh` (query string hash: SHA-256 hex of sorted query params or '' if none), `bh` (body hash: SHA-256 hex of raw request body bytes; '' if no body). JWT header: `{alg: 'EdDSA', typ: 'sentinel-proof+jwt', kid: consumer_did + '#' + key_fragment}`."
+      },
+      {
+        "step": 2,
+        "title": "Implement body_hash computation",
+        "detail": "Function `compute_body_hash(body: bytes | None) -> str`. If body is None or empty, return empty string ''. Otherwise return `hashlib.sha256(body).hexdigest()`. IMPORTANT: body must be read in full before hashing. For streaming requests, buffer the entire body up to MAX_BODY_SIZE (2MB) before computing hash. If body exceeds MAX_BODY_SIZE, raise `ProofError(BODY_TOO_LARGE)`. The hash is computed over raw bytes before any decoding/parsing — the producer must recompute over the raw bytes it receives to verify."
+      },
+      {
+        "step": 3,
+        "title": "Implement query_hash computation",
+        "detail": "Function `compute_query_hash(url: str) -> str`. Parse query string from URL. Sort parameters alphabetically by key (then by value for duplicate keys). Reconstruct as `key=value&key2=value2` (URL-encoded). Return SHA-256 hex of the resulting string. If no query params, return ''. This prevents query param injection on the producer side."
+      },
+      {
+        "step": 4,
+        "title": "Implement ProofClaimsBuilder (consumer side)",
+        "detail": "Class `ProofClaimsBuilder` with method `build(method, url, body, aud, env, exp_seconds=60) -> tuple[str, dict]` returning `(proof_jwt, claims_dict)`. Steps: (1) compute qsh and bh. (2) Generate jti = str(uuid4()). (3) Build claims dict. (4) Sign as compact JWT using EdDSA with consumer DID private key (from DIDKeyManager, TASK-039). Return both the JWT string and claims dict (used for logging jti). Never include VP in the proof JWT itself — VP goes in a separate header."
+      },
+      {
+        "step": 5,
+        "title": "Implement VP attachment and request construction",
+        "detail": "Function `build_secure_headers(proof_jwt: str, vp_jwt: str) -> dict`. Returns: `{'Authorization': f'SentinelProof {proof_jwt}', 'SentinelVP': vp_jwt}`. The `vp_jwt` must already be a valid JWT-VP created by `create_vp` from TASK-041 with `aud=producer_service_did` and a `nonce` that matches a value embedded in the proof (use `jti` as nonce for VP — this binds VP to the specific request). The producer verifies that `vp.nonce == proof.jti`."
+      },
+      {
+        "step": 6,
+        "title": "Implement ProofVerifier (producer side)",
+        "detail": "Class `ProofVerifier` with method `async verify(request: Request, expected_aud: str, expected_env: str, resolver: DIDResolver, trust_client: TrustLayerClient, replay_cache: ReplayCache) -> VerificationResult`. Steps in order: (1) Extract `Authorization: SentinelProof <jwt>` header — if missing, return MISSING_PROOF (401). (2) Decode JWT header to get kid/iss without verifying. (3) Resolve consumer DID. (4) Verify JWT signature — if invalid, return SIGNATURE_INVALID (401). (5) Check exp > now and iat <= now + max_clock_skew (from policy). (6) Check aud == expected_aud (constant-time). (7) Check env == expected_env. (8) Recompute body_hash from request body and compare with bh claim. (9) Recompute query_hash and compare with qsh claim. (10) Check jti not in replay cache — if present, return REPLAY_DETECTED (401). (11) Insert jti into replay cache with TTL = exp - iat + max_clock_skew. (12) Extract SentinelVP header and call verify_vp(aud=expected_aud, nonce=proof.jti). Return VerificationResult(consumer_did, verified_vcs, jti)."
+      },
+      {
+        "step": 7,
+        "title": "Implement ReplayCache",
+        "detail": "Class `ReplayCache` backed by Redis. Method `async check_and_insert(jti: str, iss: str, aud: str, ttl_seconds: int) -> bool`. Key: `f'replay:{hashlib.sha256(f\"{jti}:{iss}:{aud}\".encode()).hexdigest()}'`. Use Redis `SET key 1 NX EX {ttl_seconds}` (atomic check-and-set). Returns True if jti was NEW (inserted), False if already present (replay). If Redis unavailable: fall back to in-memory LRU (max 50000 entries) with TTL enforcement; log WARNING. The in-memory fallback DOES NOT persist across restarts — this is acceptable because proof JWTs expire within 60s and the risk window is small."
+      },
+      {
+        "step": 8,
+        "title": "Define deny response format",
+        "detail": "All verification failures on the producer side return JSON with ONLY: `{error: <code>, request_id: <trace_id>}`. No internal detail, no claim values, no DID values. HTTP status: 401 for auth failures (missing proof, invalid sig, expired, replay, VP invalid), 403 for policy denial (aud/env mismatch — confirms identity but denies access). Error codes: `MISSING_PROOF`, `SIGNATURE_INVALID`, `PROOF_EXPIRED`, `CLOCK_SKEW_EXCEEDED`, `BODY_HASH_MISMATCH`, `QUERY_HASH_MISMATCH`, `REPLAY_DETECTED`, `AUD_MISMATCH`, `ENV_MISMATCH`, `VP_INVALID`, `VP_VC_INVALID`."
+      },
+      {
+        "step": 9,
+        "title": "Retry safety on consumer side",
+        "detail": "When the consumer retries a failed request, a NEW jti MUST be generated for each attempt. The VP must also be rebuilt with the new jti as nonce. Never reuse the same `jti` — the producer's replay cache will reject it even if the first attempt timed out. Document this contract in `RETRY_SAFETY.md` in the security_envelope module. The consumer pipeline (TASK-044) is responsible for calling `ProofClaimsBuilder.build()` fresh on each retry."
+      },
+      {
+        "step": 10,
+        "title": "Tests",
+        "detail": "Test file: `tests/unit/security_envelope/test_envelope.py`. Cases: (1) round-trip build+verify succeeds; (2) tampered body detected via bh mismatch; (3) tampered query string detected via qsh mismatch; (4) expired proof rejected; (5) replay of same jti rejected second time; (6) wrong aud rejected; (7) missing SentinelVP header rejected; (8) VP nonce mismatch (vp.nonce != proof.jti) rejected; (9) clock skew exactly at limit accepted; (10) clock skew beyond limit rejected. Use mock Redis for replay cache and mock DIDResolver."
+      }
+    ]
+  },
+  "project_structure": {
+    "files": {
+      "libs/common/security_envelope/__init__.py": "Public exports: ProofClaimsBuilder, ProofVerifier, ReplayCache, ProofError",
+      "libs/common/security_envelope/builder.py": "ProofClaimsBuilder, compute_body_hash, compute_query_hash, build_secure_headers",
+      "libs/common/security_envelope/verifier.py": "ProofVerifier, VerificationResult dataclass",
+      "libs/common/security_envelope/replay_cache.py": "ReplayCache with Redis primary and in-memory fallback",
+      "libs/common/security_envelope/errors.py": "ProofError, ProofErrorCode enum with all deny codes",
+      "libs/common/security_envelope/RETRY_SAFETY.md": "Documents jti uniqueness requirement per retry",
+      "tests/unit/security_envelope/test_envelope.py": "Full test suite with 10 adversarial vectors"
+    }
+  },
+  "data_structures": {
+    "proof_jwt_header": {
+      "alg": "EdDSA",
+      "typ": "sentinel-proof+jwt",
+      "kid": "<consumer_did>#<key_fragment>"
+    },
+    "proof_jwt_claims": {
+      "jti": "uuid4 string",
+      "iat": 1700000000,
+      "exp": 1700000060,
+      "aud": "did:key:z6Mk...#producer",
+      "env": "prod",
+      "htm": "POST",
+      "htu": "https://producer.svc/api/v1/resource",
+      "qsh": "a1b2c3... or empty string",
+      "bh": "d4e5f6... or empty string"
+    },
+    "headers_on_wire": {
+      "Authorization": "SentinelProof <compact_jwt>",
+      "SentinelVP": "<vp_compact_jwt>",
+      "X-Correlation-ID": "<trace_id>"
+    },
+    "deny_response": {
+      "error": "REPLAY_DETECTED",
+      "request_id": "trace-uuid"
+    }
+  },
+  "security_constraints": [
+    "jti must be cryptographically unique (UUID v4 from os.urandom) — never sequential or predictable",
+    "body_hash computed BEFORE any content-type parsing or decoding to prevent multi-parse attacks",
+    "Replay cache TTL must be >= proof exp - iat + max_clock_skew — never shorter",
+    "VP nonce MUST equal proof.jti — this binds VP to the exact request and prevents VP replay across requests",
+    "Consumer DID must match VP holder DID — prevents stolen VP reuse",
+    "Error responses must not reflect back any claim values from the proof to prevent oracle attacks"
+  ],
+  "dependencies": ["TASK-006", "TASK-039", "TASK-041", "TASK-042"],
+  "acceptance_criteria": [
+    "Round-trip build+verify succeeds with correct inputs in under 5ms (excluding crypto setup)",
+    "All 10 adversarial test vectors pass",
+    "Replay of same jti always rejected regardless of timing",
+    "Body tampering detected: single byte change in body causes BODY_HASH_MISMATCH",
+    "Redis unavailability triggers in-memory fallback with WARNING log — not a hard failure",
+    "Deny responses contain only error code and request_id — no claim details"
+  ]
+}

@@ -1,0 +1,80 @@
+{
+  "id": "TASK-034",
+  "title": "Discovery Service: Append-Only Audit Logging with Hash Chain Integrity and Export API",
+  "component": "discovery-service",
+  "status": "not-started",
+  "description": "Implement a comprehensive, append-only, tamper-evident audit logging subsystem for the Discovery Service. Every admin mutation, credential lifecycle event, enrollment action, chain publish, and sentinel lifecycle event must produce an audit_event record. The records form a hash chain (each event includes the hash of the previous event) providing cryptographic tamper evidence. Export APIs allow security investigations with filtering, pagination, and optional signed export bundles.",
+  "objectives": [
+    "Every security-relevant action is immutably recorded with actor identity, timestamp, and summary",
+    "Hash chain integrity allows detection of record tampering or deletion",
+    "Export API enables bulk export for SIEM integration and forensic investigation"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      "Step 1 - audit_events Table (Append-Only): Table defined in TASK-022. Schema here: id (UUID PK), event_id (TEXT UNIQUE — urn:uuid:... format), ts (TIMESTAMPTZ NOT NULL default now()), actor_type (TEXT NOT NULL — 'ADMIN'|'SENTINEL'|'SYSTEM'|'BREAK_GLASS'), actor_id (TEXT — user sub or sentinel DID), action (TEXT NOT NULL — enum of audit actions), target_type (TEXT — 'service'|'sentinel'|'credential'|'enrollment_token'|'status_list'|...), target_id (TEXT), summary (JSONB — structured context, no secrets), request_id (TEXT — X-Request-ID from HTTP context), ip_address (TEXT — source IP, nullable for background tasks), prev_hash (TEXT — SHA-256 of previous event_hash for this actor or global chain), event_hash (TEXT NOT NULL — SHA-256(event_id + ts + actor_id + action + target_id + summary_canonical + prev_hash)). Partition by month (PostgreSQL declarative partitioning on ts). NO UPDATE or DELETE via ORM — enforced by database rule and ORM policy.",
+      "Step 2 - AuditLogger Service: Create services/discovery/src/discovery/services/audit_logger.py. Class AuditLogger. Method: log(session, actor: ActorContext, action: AuditAction, target_type: str, target_id: str, summary: dict, request_id: str = None). Computes: prev_hash by querying the latest event_hash where actor_id = actor.id (ordered by ts DESC). Computes event_hash. Inserts new row. All audit log calls are synchronous within the same DB transaction as the triggering action — audit and action commit together.",
+      "Step 3 - AuditAction Enum: Define a Python Enum class AuditAction with all permitted audit action strings. Include: CREATE_SERVICE, UPDATE_SERVICE, DEACTIVATE_SERVICE, CREATE_ENROLLMENT_TOKEN, APPROVE_ENROLLMENT_TOKEN, CANCEL_ENROLLMENT_TOKEN, SENTINEL_ONBOARDED, SENTINEL_DECOMMISSIONED, SENTINEL_REJOINED, ISSUE_CREDENTIAL, REVOKE_CREDENTIAL, ROTATE_CREDENTIAL, PUBLISH_STATUS_LIST, ANCHOR_STATUS_ON_CHAIN, ROLLBACK_CONFIG, ADMIN_LOGIN, ADMIN_LOGOUT, BREAK_GLASS_ACCESS, KEY_ROTATION. This list is exhaustive for MVP — new actions require code review.",
+      "Step 4 - Mandatory Integration: Every service / router that mutates state MUST call AuditLogger.log(). Enforced by: (a) base service class that requires audit_log parameter, (b) integration test that creates a resource without audit call and verifies test fails (negative test). Helper: @require_audit decorator for service methods.",
+      "Step 5 - Periodic Checkpoint: Background task (every 1 hour): compute a global chain checkpoint = SHA-256(last 1000 event_hashes joined). Store checkpoint in a separate audit_checkpoints table with timestamp and checkpoint_hash. Optionally anchor checkpoint_hash on-chain (TASK-031). This provides a coarse integrity anchor without requiring per-event on-chain writes.",
+      "Step 6 - Tamper Detection Endpoint: POST /api/v1/audit/verify-integrity (security-admin only). Steps: for a given time range, re-compute event_hash for each event by re-hashing content fields, compare against stored event_hash. Returns { events_checked, tampered_count, first_tampered_event_id }. This is a diagnostic tool — run on demand during investigations.",
+      "Step 7 - Export API: GET /api/v1/audit/events. Auth: security-admin. Query params: from (ISO-8601), to (ISO-8601), actor_id, action (multi-value), target_type, cursor (base64), limit (max 500). Returns paginated list of audit events with all fields (except raw secret fields). Response includes X-Total-Count header. Supports Accept: application/x-ndjson for streaming export.",
+      "Step 8 - Signed Export Bundle: POST /api/v1/audit/export. Auth: security-admin. Body: { from, to, include_hash_verification: bool }. Background job: collect all events for range → serialize to NDJSON → sign with Discovery issuer key as JWS → store in object storage or return as download URL. Status polling: GET /api/v1/audit/exports/{export_id}. Used for legal/forensic export.",
+      "Step 9 - Summary Fields Sanitization: summary JSONB field must NEVER contain: passwords, raw tokens, private keys, PII beyond actor_id, raw JWT content. Enforced by AuditLogger.sanitize_summary() which strips known sensitive keys and truncates values > 1000 chars. Test: unit test that passes a summary with a 'token' key and verifies it is redacted.",
+      "Step 10 - Retention Policy: Default: keep audit_events for 7 years (configurable per env: AUDIT_RETENTION_YEARS). Deletion only allowed via a separate privileged retention job with dual-admin approval (not via ORM). Partitioned tables make old partition archiving safe — archive to cold storage, then detach partition."
+    ],
+    "project_structure": {
+      "files": {
+        "services/discovery/src/discovery/services/audit_logger.py": "AuditLogger class, AuditAction enum",
+        "services/discovery/src/discovery/api/v1/routers/audit.py": "GET /audit/events, POST /audit/export, POST /audit/verify-integrity",
+        "services/discovery/src/discovery/tasks/audit_checkpoint.py": "Background task for hourly checkpoints",
+        "services/discovery/src/discovery/db/models/audit.py": "audit_events + audit_checkpoints ORM models"
+      }
+    },
+    "api_endpoints": [
+      {
+        "method": "GET",
+        "path": "/api/v1/audit/events",
+        "auth": "security-admin",
+        "query_params": { "from": "2024-01-01T00:00:00Z", "to": "2024-01-15T23:59:59Z", "action": "REVOKE_CREDENTIAL", "limit": 100 },
+        "response_200": {
+          "items": [
+            {
+              "event_id": "urn:uuid:...",
+              "ts": "2024-01-15T10:00:00Z",
+              "actor_type": "ADMIN",
+              "actor_id": "admin@example.gov",
+              "action": "REVOKE_CREDENTIAL",
+              "target_type": "credential",
+              "target_id": "uuid",
+              "summary": { "jti": "urn:uuid:...", "reason": "compromised", "severity": "critical" },
+              "request_id": "abc123",
+              "event_hash": "sha256hex..."
+            }
+          ],
+          "next_cursor": "base64...",
+          "total_count": 1
+        }
+      }
+    ],
+    "error_handling": [
+      { "condition": "AuditLogger fails to persist (DB error)", "behavior": "The triggering action MUST also roll back (transactional). Log to stderr with CRITICAL level. Emit metric audit_write_failure_total. Do not silently continue without audit." },
+      { "condition": "Tamper detected in verify-integrity", "behavior": "Return tampered events list. Emit metric audit_tamper_detected=1. Log to SIEM. Action: manual investigation required — system continues running." }
+    ],
+    "security_constraints": [
+      "Audit records are written atomically with the triggering action — no action can succeed without its audit record",
+      "Append-only: no UPDATE or DELETE ORM operations on audit_events (enforced by PostgreSQL RULE or audit_events trigger)",
+      "Hash chain allows detection of insertion, deletion, or modification of any audit record",
+      "summary field is sanitized to remove secrets — token values replaced with <REDACTED>",
+      "Export requires security-admin role and generates its own audit event: 'AUDIT_EXPORT_INITIATED'"
+    ]
+  },
+  "dependencies": ["TASK-023", "TASK-022", "TASK-020"],
+  "acceptance_criteria": [
+    "Every mutation endpoint (create service, approve token, revoke credential, etc.) produces an audit event in the same DB transaction",
+    "Two consecutive audit events have prev_hash of event N = event_hash of event N-1",
+    "POST /audit/verify-integrity on unmodified data returns tampered_count=0",
+    "Modifying an audit record directly in DB and running verify-integrity shows tampered_count > 0",
+    "Export API returns all events in date range with correct pagination",
+    "summary fields containing 'token', 'key', 'password' substrings are redacted in audit log"
+  ]
+}

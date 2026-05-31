@@ -1,0 +1,143 @@
+{
+  "id": "TASK-006",
+  "title": "Request Security Envelope Specification: Signing, Anti-Replay, and Binding (aud/env/request-hash)",
+  "component": "security",
+  "status": "not-started",
+  "description": "Define the complete schema of the 'request proof' created by the Consumer Sentinel and verified by the Producer Sentinel. The proof must resist replay attacks and bind credentials to the specific request, audience, and environment. This specification uses RFC 9449 DPoP as a reference for required properties (jti/iat/binding) and must be transport-agnostic at the semantic level.",
+  "objectives": [
+    "Deterministic anti-replay using jti + replay cache with small time window",
+    "Audience and environment binding for non-confusion between environments",
+    "Integrable into both HTTP and future adapters (DIDComm/MQTT)"
+  ],
+  "implementation_guidance": {
+    "overview": "Define the ProofClaims JWT structure that the Consumer Sentinel creates for every outgoing request, and the verification procedure that the Producer Sentinel executes. The proof binds the request's HTTP method, path, query, body hash, audience DID, environment, and a nonce. This spec is the source of truth for TASK-043 (implementation).",
+    "steps": [
+      "Step 1 - ProofClaims Object Definition: A ProofClaims is a signed JWT. JOSE header: {alg: 'EdDSA', typ: 'sentinel-proof+jwt', kid: '<Consumer Sentinel DID fragment>'}. JWT payload claims: iss (Consumer Sentinel DID — required), aud (Producer Service DID — required), env (one of dev/test/prod — required), iat (Unix timestamp — required), exp (iat + 30 seconds — required, maximum TTL 30s configurable via TrustPolicyRegistry.maxProofTtlSeconds), jti (UUIDv4 — required, must be unique), req (request binding object — required), nonce (string — optional but recommended for stateful session binding), trace_id (string — optional, for observability).",
+      "Step 2 - Request Binding Object (req field): req.method (string, uppercase HTTP method: GET|POST|PUT|PATCH|DELETE — required), req.path (string, URL-decoded path with leading slash, strip query — required), req.query_hash (string, base64url(SHA-256(raw_query_string)) — required, use base64url(SHA-256('')) if no query), req.body_hash (string, base64url(SHA-256(raw_body_bytes)) — required, use base64url(SHA-256(b'')) for GET or empty body), req.content_type (string, normalized Content-Type without parameters — required if POST/PUT/PATCH, null otherwise).",
+      "Step 3 - Transmission Format: ProofClaims is signed using Consumer Sentinel's DID private key (EdDSA). The resulting JWS compact serialization is attached as HTTP header: Authorization: SentinelProof <jws_compact>. The VP (Verifiable Presentation JWT) is attached as header: SentinelVP: <jwt_vp_compact>. Both headers are required for authenticated requests. No fallback to omitting either header is allowed.",
+      "Step 4 - Nonce Generation and Validation: The producer can require a session nonce by returning it in a prior response header: Sentinel-Nonce: <nonce_value>. If the producer returns Sentinel-Nonce, the consumer MUST include it in the next request's ProofClaims.nonce field. Producer validates that the nonce matches the stored per-session nonce and marks it as consumed. Nonce store: Redis key=session_nonce:{producer_did}:{consumer_did}:{nonce}, TTL=300 seconds.",
+      "Step 5 - Verification Procedure at Producer Sentinel (ordered steps): (1) Extract Authorization header and SentinelVP header; if missing → 401 MISSING_PROOF. (2) Verify ProofClaims JWT JOSE header: alg must be in allowed list, typ must be sentinel-proof+jwt. (3) Verify JWS signature using consumer DID's public key (derived from did:key). (4) Verify exp is in the future (allow maxClockSkew from TrustPolicyRegistry). (5) Verify iat is in the recent past (within exp-iat window + maxClockSkew). (6) Verify aud matches this Producer's DID exactly. (7) Verify env matches this Producer's configured environment. (8) Recalculate body_hash from the received request body — compare with req.body_hash. (9) Verify jti has not been seen before (replay cache lookup). (10) IF step 9 passes, immediately INSERT jti into replay cache BEFORE forwarding to backend. (11) Verify nonce if required. (12) Proceed to VP/VC verification.",
+      "Step 6 - Body Hash Computation: For streaming bodies or large bodies, compute SHA-256 hash while reading. Cap body size at configurable max (default 4MB). For GET, HEAD, OPTIONS, TRACE, DELETE with no body: use SHA-256 of empty bytes (base64url: '47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU'). For gzip content-encoding: hash the compressed bytes (producer must decompress after hash verification).",
+      "Step 7 - Replay Cache Design: Cache key: concatenate jti + ':' + iss (Consumer DID) to prevent cross-issuer jti reuse. Use Redis SET NX (set if not exists) with TTL = (exp - iat) + maxClockSkew + 5 seconds. If SET NX returns false → 401 REPLAY_DETECTED. In case of Redis unavailability, use in-memory LRU cache as fallback (but log a warning — cross-instance replay protection degrades). Cache TTL formula ensures all proofs in the TTL window are protected.",
+      "Step 8 - VP Verification Integration: After ProofClaims is verified, extract VP from SentinelVP header. Verify VP signature, verify VP.nonce matches ProofClaims.jti (VP is bound to the specific proof). Verify VP contains at least one AccessGrantCredential. Pass VP to policy engine (TASK-047).",
+      "Step 9 - HTTP Transport Intermediary Considerations: Document what happens when Discovery or a load balancer rewrites the URL. The req.path MUST be the path as presented to the Producer Sentinel — if a reverse proxy rewrites paths, the Consumer must know and use the final path. Provide a configuration option: proof_path_mode = 'original' (use original path) or 'rewritten' (use the path as intended by producer).",
+      "Step 10 - Example Full Request Headers: Provide exact example showing both headers with values structured per spec."
+    ],
+    "project_structure": {
+      "files": [
+        "docs/protocols/request-security-envelope.md — full specification",
+        "libs/common/proof/__init__.py",
+        "libs/common/proof/builder.py — ProofClaims JWT builder",
+        "libs/common/proof/verifier.py — ProofClaims verification logic",
+        "libs/common/proof/replay_cache.py — jti replay cache (Redis + LRU fallback)",
+        "libs/common/proof/models.py — Pydantic models for ProofClaims and ReqBinding",
+        "libs/common/proof/hash_utils.py — body_hash and query_hash computation",
+        "tests/unit/proof/test_builder.py",
+        "tests/unit/proof/test_verifier.py",
+        "tests/unit/proof/test_replay_cache.py",
+        "tests/unit/proof/test_hash_utils.py"
+      ]
+    },
+    "domain_entities": {
+      "ReqBinding": {
+        "fields": [
+          "method: Literal['GET','POST','PUT','PATCH','DELETE','HEAD','OPTIONS'] — required",
+          "path: str — required, starts with /, max 2048 chars",
+          "query_hash: str — base64url(SHA-256 of raw query), required",
+          "body_hash: str — base64url(SHA-256 of raw body), required",
+          "content_type: Optional[str] — normalized content type, null for GET"
+        ]
+      },
+      "ProofClaims": {
+        "fields": [
+          "iss: str — Consumer Sentinel DID, required",
+          "aud: str — Producer Service DID, required",
+          "env: Literal['dev','test','prod'] — required",
+          "iat: int — Unix timestamp, required",
+          "exp: int — iat + max_proof_ttl (default 30), required",
+          "jti: str — UUIDv4, required",
+          "req: ReqBinding — required",
+          "nonce: Optional[str] — session nonce from producer",
+          "trace_id: Optional[str] — OpenTelemetry trace ID"
+        ]
+      }
+    },
+    "data_structures": {
+      "proof_claims_example": {
+        "description": "Example ProofClaims JWT payload",
+        "payload": {
+          "iss": "did:key:z6MkConsumerSentinelDID",
+          "aud": "did:key:z6MkProducerServiceDID",
+          "env": "prod",
+          "iat": 1741910400,
+          "exp": 1741910430,
+          "jti": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+          "req": {
+            "method": "POST",
+            "path": "/api/v1/citizens/123/records",
+            "query_hash": "47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU",
+            "body_hash": "n4bQgYhMfWWaL-qgxVrQFaO_TxsrC4Is0V1sFbDwCgg",
+            "content_type": "application/json"
+          },
+          "nonce": "YOGa5yPcHcSm9wnKHxEJ",
+          "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736"
+        }
+      },
+      "request_headers_example": {
+        "Authorization": "SentinelProof eyJhbGciOiJFZERTQSIsInR5cCI6InNlbnRpbmVsLXByb29mK2p3dCIsImtpZCI6ImRpZDprZXk6ejZNaC4uLiN6Nk1oLi4uIn0.eyJpc3MiOiJkaWQ6a2V5OnoyTWtDb25zdW1lckRJRCIsImF1ZCI6ImRpZDprZXk6ejZNa1Byb2R1Y2VyRElEIiwiZW52IjoicHJvZCIsImlhdCI6MTc0MTkxMDQwMCwiZXhwIjoxNzQxOTEwNDMwLCJqdGkiOiJhMWIyYzNkNC1lNWY2LTc4OTAtYWJjZC1lZjEyMzQ1Njc4OTAiLCJyZXEiOnsibWV0aG9kIjoiUE9TVCIsInBhdGgiOiIvYXBpL3YxL2NpdGl6ZW5zLzEyMy9yZWNvcmRzIiwicXVlcnlfaGFzaCI6IjQ3REVRY... (truncated)",
+        "SentinelVP": "eyJhbGciOiJFZERTQSIsInR5cCI6InZwK2p3dCJ9... (JWT-VP compact)"
+      },
+      "replay_cache_entry": {
+        "key": "replay:{jti}:{iss_hash}",
+        "value": "1",
+        "ttl_seconds": 65,
+        "description": "TTL = (exp - iat) + maxClockSkew + 5"
+      }
+    },
+    "error_handling": {
+      "proof_verification_errors": [
+        {"code": "MISSING_PROOF", "http_status": 401, "description": "Authorization: SentinelProof header absent"},
+        {"code": "MISSING_VP", "http_status": 401, "description": "SentinelVP header absent"},
+        {"code": "PROOF_ALG_PROHIBITED", "http_status": 400, "description": "ProofClaims JWT uses prohibited algorithm"},
+        {"code": "PROOF_SIGNATURE_INVALID", "http_status": 401, "description": "JWS signature does not verify"},
+        {"code": "PROOF_EXPIRED", "http_status": 401, "description": "exp claim has passed"},
+        {"code": "PROOF_NOT_YET_VALID", "http_status": 401, "description": "iat is more than maxClockSkew in the future"},
+        {"code": "AUD_MISMATCH", "http_status": 403, "description": "aud does not match this producer's DID"},
+        {"code": "ENV_MISMATCH", "http_status": 403, "description": "env does not match this producer's environment"},
+        {"code": "BODY_HASH_MISMATCH", "http_status": 400, "description": "Recalculated body hash does not match req.body_hash"},
+        {"code": "REPLAY_DETECTED", "http_status": 401, "description": "jti has already been seen in the replay window"},
+        {"code": "NONCE_INVALID", "http_status": 401, "description": "nonce is missing or does not match stored session nonce"},
+        {"code": "PROOF_TTL_TOO_LONG", "http_status": 400, "description": "exp - iat exceeds maxProofTtlSeconds from TrustPolicyRegistry"}
+      ]
+    },
+    "security_constraints": [
+      "The jti MUST be inserted into the replay cache BEFORE the request is forwarded to the backend service — not after. Doing it after creates a TOCTOU window.",
+      "The replay cache TTL MUST cover the full proof validity window: (exp - iat) + maxClockSkew + buffer — never shorter",
+      "body_hash computation MUST use the raw undecoded bytes — not the parsed body",
+      "For gzip content-encoding, hash the compressed bytes and document this clearly",
+      "The nonce from the producer is a defense-in-depth mechanism — its absence does not exempt from replay protection",
+      "Cross-environment replay is mitigated by env binding in BOTH the ProofClaims JWT and the VP — Producer verifies BOTH independently",
+      "The VP is bound to the ProofClaims by requiring VP.nonce == ProofClaims.jti"
+    ]
+  },
+  "technical_requirements": [
+    "RFC 9449 DPoP as conceptual reference for jti/iat/binding pattern",
+    "W3C VC-JOSE-COSE for JWS signing",
+    "Redis for replay cache (SET NX with TTL)",
+    "SHA-256 for body_hash and query_hash computation",
+    "RFC 9421 HTTP Message Signatures as optional future enhancement (not MVP)"
+  ],
+  "dependencies": [
+    "TASK-003",
+    "TASK-004"
+  ],
+  "acceptance_criteria": [
+    "Request Security Envelope specification document exists with all fields defined",
+    "ProofClaims Pydantic model exists with all required field validations",
+    "ProofClaims builder and verifier are implemented in libs/common/proof/",
+    "Replay cache is implemented with Redis primary and LRU fallback",
+    "body_hash and query_hash computation utilities exist and are tested",
+    "Producer correctly rejects: missing proof, expired proof, body hash mismatch, jti replay, aud mismatch, env mismatch",
+    "Example request headers with both SentinelProof and SentinelVP are documented"
+  ]
+}

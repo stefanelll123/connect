@@ -1,0 +1,77 @@
+global:
+  resolve_timeout: 5m
+  # SMTP config (override in prod via secret)
+  smtp_from: alertmanager@example.com
+
+# Dead man's switch — route to healthcheck.io to prove monitoring is alive
+route:
+  group_by: [alertname, env, service_id]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  receiver: default-receiver
+  routes:
+    # Critical alerts → PagerDuty
+    - match:
+        severity: critical
+      receiver: pagerduty-critical
+      group_wait: 0s
+      repeat_interval: 1h
+
+    # Warning alerts → Slack
+    - match:
+        severity: warning
+      receiver: slack-warnings
+      group_wait: 1m
+      repeat_interval: 4h
+
+    # Watchdog → healthcheck.io (dead man's switch)
+    - match:
+        alertname: SentinelWatchdog
+      receiver: watchdog
+      group_wait: 0s
+      group_interval: 1m
+      repeat_interval: 2m
+
+inhibit_rules:
+  # Inhibit StatusListStale if IssuerDisabledOnChain is firing for same service
+  - source_match:
+      alertname: IssuerDisabledOnChain
+    target_match:
+      alertname: StatusListStale
+    equal: [service_id, env]
+
+  # Inhibit warning if critical is already firing for same alert
+  - source_match:
+      severity: critical
+    target_match:
+      severity: warning
+    equal: [alertname, service_id, env]
+
+receivers:
+  - name: default-receiver
+    # No-op fallback
+
+  - name: pagerduty-critical
+    pagerduty_configs:
+      - routing_key: ${PAGERDUTY_INTEGRATION_KEY}
+        severity: critical
+        description: |
+          {{ .CommonAnnotations.summary }}
+          {{ .CommonAnnotations.description }}
+          Runbook: {{ .CommonAnnotations.runbook_url }}
+
+  - name: slack-warnings
+    slack_configs:
+      - api_url: ${SLACK_WEBHOOK_URL}
+        channel: "#sentinel-alerts"
+        title: "{{ .CommonAnnotations.summary }}"
+        text: |
+          *Description:* {{ .CommonAnnotations.description }}
+          *Runbook:* {{ .CommonAnnotations.runbook_url }}
+          *Severity:* {{ .CommonLabels.severity }}
+
+  - name: watchdog
+    webhook_configs:
+      - url: ${HEALTHCHECK_IO_URL}
+        send_resolved: false

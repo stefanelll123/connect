@@ -1,0 +1,81 @@
+{
+  "id": "TASK-015",
+  "title": "TrustPolicyRegistry Smart Contract: Policy Definitions and Scope Binding",
+  "component": "contracts",
+  "status": "not-started",
+  "description": "Implement the TrustPolicyRegistry contract. A trust policy binds a service (identified by serviceId) to a set of allowed issuer DIDs and required VC types. Producer Sentinels query this registry to enforce which issuers/credential types are accepted for a given service. Policies have version numbers for auditability.",
+  "objectives": [
+    "On-chain binding of service identifiers to trust requirements",
+    "Support multi-issuer policies (a service may accept credentials from multiple issuers)",
+    "Version history retained for audit — old policies not deleted, only superseded",
+    "Integrate with IssuerRegistry: validate that registered issuers exist before binding"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      "Step 1 - Contract Inheritance: AccessControl, Pausable (OpenZeppelin v5). Role: POLICY_ADMIN_ROLE = keccak256('POLICY_ADMIN_ROLE').",
+      "Step 2 - TrustPolicy Struct: struct TrustPolicy { string serviceId; string[] allowedIssuerDids; string[] requiredCredentialTypes; uint256 version; uint256 createdAt; uint256 updatedAt; bool active; string description; }",
+      "Step 3 - Storage: mapping(bytes32 => TrustPolicy) private _policies; key = keccak256(serviceId). mapping(bytes32 => TrustPolicy[]) private _policyHistory; stores all previous versions. bytes32[] private _policyKeys for enumeration.",
+      "Step 4 - Events: event PolicyCreated(bytes32 indexed serviceIdHash, string serviceId, uint256 version, address indexed createdBy); event PolicyUpdated(bytes32 indexed serviceIdHash, string serviceId, uint256 newVersion, address indexed updatedBy); event PolicyDeactivated(bytes32 indexed serviceIdHash, string serviceId, address indexed deactivatedBy);",
+      "Step 5 - createPolicy(string calldata serviceId, string[] calldata allowedIssuerDids, string[] calldata requiredCredentialTypes, string calldata description): onlyRole(POLICY_ADMIN_ROLE). Validate: serviceId > 0, allowedIssuerDids.length >= 1. Require: !_policies[hash].active (no existing active policy for this service). Set version=1. Emit PolicyCreated.",
+      "Step 6 - updatePolicy(string calldata serviceId, string[] calldata allowedIssuerDids, string[] calldata requiredCredentialTypes, string calldata description): onlyRole(POLICY_ADMIN_ROLE). Copy current policy to _policyHistory. Increment version. Update fields. Emit PolicyUpdated.",
+      "Step 7 - deactivatePolicy(string calldata serviceId): onlyRole(POLICY_ADMIN_ROLE). Sets active=false. Emit PolicyDeactivated.",
+      "Step 8 - Read Functions: getPolicy(string calldata serviceId) returns (TrustPolicy memory). isPolicyActive(string calldata serviceId) returns (bool). getPolicyHistory(string calldata serviceId) returns (TrustPolicy[] memory) — returns all historical versions. getPolicyCount() returns (uint256). isIssuerAllowedForService(string calldata serviceId, string calldata issuerDid) returns (bool) — convenience function.",
+      "Step 9 - ITrustPolicyRegistry Interface: in contracts/interfaces/ITrustPolicyRegistry.sol. Export all external views and mutating functions.",
+      "Step 10 - IssuerRegistry Reference: Store IssuerRegistry address in constructor. In createPolicy and updatePolicy, call IIssuerRegistry(issuerRegistry).isIssuerActive(did) for each allowedIssuerDid — if any issuer is not active, revert with UnknownIssuer(did). This prevents binding policies to unregistered issuers."
+    ],
+    "project_structure": {
+      "files": {
+        "contracts/contracts/Registries/TrustPolicyRegistry.sol": "Main contract",
+        "contracts/contracts/interfaces/ITrustPolicyRegistry.sol": "Interface",
+        "contracts/test/TrustPolicyRegistry.test.ts": "Hardhat tests"
+      }
+    },
+    "domain_entities": [
+      {
+        "name": "TrustPolicy",
+        "type": "Solidity struct",
+        "fields": [
+          {"name": "serviceId", "type": "string"},
+          {"name": "allowedIssuerDids", "type": "string[]"},
+          {"name": "requiredCredentialTypes", "type": "string[]"},
+          {"name": "version", "type": "uint256"},
+          {"name": "createdAt", "type": "uint256"},
+          {"name": "updatedAt", "type": "uint256"},
+          {"name": "active", "type": "bool"},
+          {"name": "description", "type": "string"}
+        ]
+      }
+    ],
+    "error_handling": {
+      "custom_errors": [
+        "error PolicyAlreadyExists(bytes32 serviceIdHash);",
+        "error PolicyNotFound(bytes32 serviceIdHash);",
+        "error UnknownIssuer(string did);",
+        "error EmptyAllowedIssuers();"
+      ]
+    },
+    "security_constraints": [
+      "Cannot create a policy with zero allowed issuers — must have at least one",
+      "isIssuerAllowedForService iterates allowedIssuerDids array — cap array at 100 entries to prevent gas limit issues",
+      "Policy history is retained permanently — no deletion mechanism",
+      "IssuerRegistry address is immutable after construction — set in constructor, no setter"
+    ]
+  },
+  "technical_requirements": [
+    "Solidity 0.8.25",
+    "@openzeppelin/contracts 5.x",
+    "Cross-contract call to IssuerRegistry"
+  ],
+  "dependencies": [
+    "TASK-013",
+    "TASK-014"
+  ],
+  "acceptance_criteria": [
+    "createPolicy stores policy and emits PolicyCreated",
+    "updatePolicy saves old version to history and emits PolicyUpdated",
+    "createPolicy reverts if an allowedIssuerDid is not active in IssuerRegistry",
+    "isIssuerAllowedForService returns correct boolean for each case",
+    "Policy history retrievable via getPolicyHistory",
+    "All tests pass"
+  ]
+}

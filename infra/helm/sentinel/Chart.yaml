@@ -1,0 +1,16 @@
+apiVersion: v2
+name: sentinel-node
+description: Sentinel node — DID-based mutual authentication gateway
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - sentinel
+  - did
+  - authentication
+  - gateway
+maintainers:
+  - name: Platform Team
+home: https://github.com/your-org/connect
+sources:
+  - https://github.com/your-org/connect/tree/main/services/sentinel

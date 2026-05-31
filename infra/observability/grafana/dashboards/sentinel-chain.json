@@ -1,0 +1,79 @@
+{
+  "uid": "sentinel-chain",
+  "title": "Sentinel — Chain Events",
+  "tags": ["sentinel", "chain", "indexer"],
+  "timezone": "browser",
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Indexer Lag (blocks)",
+      "gridPos": {"x": 0, "y": 0, "w": 6, "h": 4},
+      "targets": [{"refId": "A", "datasource": {"uid": "prometheus"}, "expr": "max(sentinel_chain_indexer_lag_blocks)"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}},
+      "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 50}, {"color": "red", "value": 200}]}}}
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Chain RPC Status",
+      "gridPos": {"x": 6, "y": 0, "w": 6, "h": 4},
+      "targets": [{"refId": "A", "datasource": {"uid": "prometheus"}, "expr": "up{job=\"discovery\", subsystem=\"chain\"}"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "orientation": "auto"},
+      "fieldConfig": {"defaults": {"mappings": [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}]}}
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Chain Events (1h)",
+      "gridPos": {"x": 12, "y": 0, "w": 6, "h": 4},
+      "targets": [{"refId": "A", "datasource": {"uid": "prometheus"}, "expr": "sum(increase(sentinel_chain_events_total[1h]))"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}},
+      "fieldConfig": {"defaults": {"unit": "short"}}
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Issuer Disable Events (24h)",
+      "gridPos": {"x": 18, "y": 0, "w": 6, "h": 4},
+      "targets": [{"refId": "A", "datasource": {"uid": "prometheus"}, "expr": "sum(increase(sentinel_chain_issuer_disabled_total[24h]))"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}},
+      "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}}
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Block Lag Over Time",
+      "gridPos": {"x": 0, "y": 4, "w": 12, "h": 8},
+      "targets": [{"refId": "A", "datasource": {"uid": "prometheus"}, "expr": "sentinel_chain_indexer_lag_blocks", "legendFormat": "lag_blocks"}],
+      "fieldConfig": {"defaults": {"unit": "short", "custom": {"thresholdsStyle": {"mode": "line+area"}}}, "overrides": [{"matcher": {"id": "byName", "options": "lag_blocks"}, "properties": [{"id": "thresholds", "value": {"mode": "absolute", "steps": [{"color": "transparent", "value": null}, {"color": "rgba(255, 152, 0, 0.1)", "value": 50}, {"color": "rgba(244, 67, 54, 0.1)", "value": 200}]}}]}]}
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Chain Events per Type",
+      "gridPos": {"x": 12, "y": 4, "w": 12, "h": 8},
+      "targets": [
+        {"refId": "A", "datasource": {"uid": "prometheus"}, "expr": "sum(rate(sentinel_chain_events_total{event_type=\"IssuerRegistered\"}[5m]))", "legendFormat": "IssuerRegistered"},
+        {"refId": "B", "datasource": {"uid": "prometheus"}, "expr": "sum(rate(sentinel_chain_events_total{event_type=\"IssuerRevoked\"}[5m]))", "legendFormat": "IssuerRevoked"},
+        {"refId": "C", "datasource": {"uid": "prometheus"}, "expr": "sum(rate(sentinel_chain_events_total{event_type=\"PolicyUpdated\"}[5m]))", "legendFormat": "PolicyUpdated"},
+        {"refId": "D", "datasource": {"uid": "prometheus"}, "expr": "sum(rate(sentinel_chain_events_total{event_type=\"StatusAnchored\"}[5m]))", "legendFormat": "StatusAnchored"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "ops"}}
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Chain RPC Latency (p50/p95/p99)",
+      "gridPos": {"x": 0, "y": 12, "w": 24, "h": 8},
+      "targets": [
+        {"refId": "A", "datasource": {"uid": "prometheus"}, "expr": "histogram_quantile(0.50, sum(rate(sentinel_chain_rpc_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p50"},
+        {"refId": "B", "datasource": {"uid": "prometheus"}, "expr": "histogram_quantile(0.95, sum(rate(sentinel_chain_rpc_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p95"},
+        {"refId": "C", "datasource": {"uid": "prometheus"}, "expr": "histogram_quantile(0.99, sum(rate(sentinel_chain_rpc_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p99"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    }
+  ]
+}

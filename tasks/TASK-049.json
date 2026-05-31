@@ -1,0 +1,93 @@
+{
+  "id": "TASK-049",
+  "title": "Sentinel: Migration and Re-registration Tooling (sentinelctl CLI, backup/restore, secure rejoin procedure)",
+  "component": "sentinel/cli/sentinelctl",
+  "status": "pending",
+  "description": "Implement a comprehensive CLI tool (sentinelctl) for sentinel lifecycle operations: status inspection, key initialization, key rotation, encrypted backup and restore (local mode), and secure rejoin to Discovery after host migration. The tool handles two modes: local mode (keys on disk, encrypted) and Vault mode (keys in HashiCorp Vault). For Vault mode, migration is a redeploy, and sentinelctl only verifies Vault access and signs PoP challenges. Include a runbook document as part of the task deliverables.",
+  "objectives": [
+    "Implement sentinelctl CLI with commands: status, init, rotate-key, backup, restore, rejoin",
+    "backup: produce AES-256-GCM encrypted archive containing key material + credentials metadata",
+    "restore: decrypt archive, verify integrity, restore key files with strict permissions",
+    "rejoin: sign DID PoP challenge from Discovery, complete onboarding handshake on new host",
+    "Vault mode: verify Vault access, sign PoP challenge using Vault-stored key",
+    "Document migration runbook: single-instance and multi-instance procedures"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      {
+        "step": 1,
+        "title": "CLI framework and command structure",
+        "detail": "Use `typer` library (type-annotated Python CLI). Entry point: `sentinelctl` (installed via pip entrypoint). Top-level commands: `status`, `init`, `rotate-key`, `backup`, `restore`, `rejoin`. Each command: validate `SENTINEL_HOME` and `SENTINEL_SERVICE_ID` env vars before proceeding. Use `rich` for colored terminal output. Non-zero exit codes on error. File: `sentinel/cli/sentinelctl.py`. Register in `pyproject.toml` as script: `sentinelctl = 'sentinel.cli.sentinelctl:app'`."
+      },
+      {
+        "step": 2,
+        "title": "sentinelctl status command",
+        "detail": "Display: instance_id (from file), DID (from key store or Vault), key storage mode (local/vault), last config bundle version and age, credential count and oldest expiry, Discovery connection status (ping), chain RPC status (ping via TrustLayerClient). Exit 0 if all checks pass, exit 1 if any critical check fails. Format as structured table using `rich.Table`. Include field `sentinel_operational: true/false` as a summary line."
+      },
+      {
+        "step": 3,
+        "title": "sentinelctl init command",
+        "detail": "Used on first deployment (local mode). Steps: (1) Create `$SENTINEL_HOME/.sentinel/` directory tree with correct permissions (`umask 0077`). (2) Generate Ed25519 key pair. (3) Derive DID from public key (did:key, multicode + multibase). (4) Encrypt private key with scrypt(N=2^18, r=8, p=1) KDF from passphrase + AES-256-GCM. (5) Write `$SENTINEL_HOME/.sentinel/store/did_key.enc` with 0600 permissions. (6) Write `$SENTINEL_HOME/.sentinel/instance_id` (new UUID). (7) Print DID to stdout for registration with Discovery admin. Prompt for passphrase twice (confirm). Never print private key material."
+      },
+      {
+        "step": 4,
+        "title": "sentinelctl rotate-key command",
+        "detail": "Steps: (1) Generate new Ed25519 key pair and derive new DID. (2) Sign a rotation announcement: `{old_did, new_did, rotation_nonce: uuid, iat}` signed with OLD key. (3) Notify Discovery via `POST /api/v1/sentinels/{id}/did-rotation` with the signed announcement (Discovery records both DIDs as valid during grace period, per TASK-039). (4) Save new key at `did_key.enc` (atomically: write to `did_key.enc.new`, verify, rename). (5) Keep old key at `did_key_prev.enc` for grace period (default 300s). (6) Print new DID. Require `--confirm` flag for safety. In Vault mode: generate new key in Vault (not locally) via Vault API, then notify Discovery."
+      },
+      {
+        "step": 5,
+        "title": "sentinelctl backup command (local mode)",
+        "detail": "Command: `sentinelctl backup --output <path>`. Steps: (1) Read passphrase for existing key (or use `--passphrase` env var for automation). (2) Collect: `did_key.enc`, `did_key_prev.enc` (if exists), `instance_id`, `store/credentials/` (all `.enc` files), `store/trust_cache.enc`, `store/status_lists/` directory. (3) Create a manifest JSON: `{created_at, sentinel_did, service_id, env, file_checksums: {}}`. (4) Compress with gzip. (5) Encrypt the archive with a NEW backup passphrase (prompted, or from `--backup-passphrase` env var) using scrypt + AES-256-GCM. (6) Write to output path. (7) Print SHA-256 fingerprint of output file — store this externally for integrity verification. Never include raw private key in backup without re-encryption."
+      },
+      {
+        "step": 6,
+        "title": "sentinelctl restore command (local mode)",
+        "detail": "Command: `sentinelctl restore --input <path> --target-dir <sentinel_home>`. Steps: (1) Verify target dir does NOT already contain a `did_key.enc` (safety check — refuse to overwrite active key without `--force`). (2) Prompt backup passphrase. (3) Decrypt + decompress archive. (4) Verify manifest checksums for each file. (5) Write files to target dir with strict permissions (0600 for all key material, 0700 for directories). (6) Print restored DID and instruct operator to complete rejoin. Exit non-zero if any checksum fails."
+      },
+      {
+        "step": 7,
+        "title": "sentinelctl rejoin command",
+        "detail": "Command: `sentinelctl rejoin --discovery-url <url>`. Used after host migration or IP change. Steps: (1) Load existing DID key (local or Vault). (2) Request a new onboarding challenge from Discovery: `POST /api/v1/sentinels/onboard/challenge` (same flow as TASK-026). (3) Sign the challenge nonce with the DID key: `sign_pop(challenge_nonce, token_jti)`. (4) Submit: `POST /api/v1/sentinels/onboard/complete` with the signed response. (5) If Discovery accepts (200): print confirmation, sentinel is now re-registered with updated endpoint. (6) For multi-instance rejoin: run on each instance separately (they share DID but have separate instance_ids). If Discovery returns 409 (already registered, same DID): treat as success — idempotent."
+      },
+      {
+        "step": 8,
+        "title": "Vault mode: verify access and sign PoP",
+        "detail": "In Vault mode, `init` and `backup` are not used (Vault manages keys). Instead: `sentinelctl vault-check` verifies connection to Vault, reads the DID key path, and prints DID. `sentinelctl rejoin` in Vault mode: loads key from Vault (no passphrase needed), signs the PoP challenge using the Vault-fetched private key via `DIDKeyManager`, then submits to Discovery. `sentinelctl rotate-key` in Vault mode: calls Vault API to generate a new key version, retrieves new public key, derives new DID, notifies Discovery. Document: Vault mode migration = redeploy new pod pointing to same Vault path; rejoin is automatic via sentinel startup flow."
+      },
+      {
+        "step": 9,
+        "title": "Migration runbook document",
+        "detail": "File: `docs/runbooks/sentinel_migration.md`. Include: (1) Pre-migration checklist (verify backup, verify Discovery admin access, verify target host meets requirements). (2) Single-instance migration steps: stop old, backup, provision new, restore, rejoin, verify status. (3) Multi-instance migration (rolling): migrate one instance at a time, verify health before next. (4) Emergency migration (host compromise): revoke all credentials via Discovery admin, provision new host with fresh init (NEW DID), re-enroll as new sentinel (new enrollment token). (5) Post-migration verification: sentinelctl status, test request flow, verify audit log shows new instance_id."
+      }
+    ]
+  },
+  "project_structure": {
+    "files": {
+      "sentinel/cli/sentinelctl.py": "Main CLI entry point with all commands",
+      "sentinel/cli/commands/status.py": "status command implementation",
+      "sentinel/cli/commands/init.py": "init command — key generation and directory setup",
+      "sentinel/cli/commands/rotate_key.py": "rotate-key command",
+      "sentinel/cli/commands/backup.py": "backup command — encrypted archive creation",
+      "sentinel/cli/commands/restore.py": "restore command — with checksum verification",
+      "sentinel/cli/commands/rejoin.py": "rejoin command — PoP challenge + submit",
+      "docs/runbooks/sentinel_migration.md": "Operational migration runbook"
+    }
+  },
+  "security_constraints": [
+    "Backup archive must use separate passphrase from key passphrase — compromise of backup should not directly expose live key",
+    "Restore must verify checksums before writing any files — prevents partial restore from corrupted archive",
+    "Private key never printed to stdout or logged — CLI must explicitly suppress key bytes in all output",
+    "Restore refuses to overwrite active key without --force to prevent accidental identity replacement",
+    "PoP challenge nonce is single-use (Discovery enforces this) — replaying rejoin attempt is rejected",
+    "scrypt parameters N=2^18 ensure key derivation takes ~1s on modern hardware — acceptable for CLI, resistant to brute force"
+  ],
+  "dependencies": ["TASK-039", "TASK-040", "TASK-008"],
+  "acceptance_criteria": [
+    "sentinelctl status exits 0 with all green when sentinel is operational",
+    "backup + restore round-trip preserves all key material with correct checksums",
+    "rejoin completes successful re-registration with Discovery on new host",
+    "rotate-key notifies Discovery and preserves old key for grace period",
+    "Backup passphrase KDF takes >= 0.5s (scrypt strength verification)",
+    "Migration runbook is complete and reviewed by a second engineer"
+  ]
+}

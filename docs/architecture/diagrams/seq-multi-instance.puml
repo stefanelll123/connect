@@ -1,0 +1,66 @@
+@startuml seq-multi-instance
+title Multi-Instance Sentinel Join
+
+participant "Orchestrator\n(k8s HPA)" as ops
+participant "Sentinel Instance 1\n(existing)" as inst1
+participant "Sentinel Instance N\n(new)" as instN
+participant "Vault" as vault
+participant "Discovery API" as disc
+participant "Redis\n(shared)" as redis
+participant "SentinelRegistry\n(Blockchain)" as chain
+
+note over ops
+  Scale-out scenario: auto-scaler launches a new Sentinel pod.
+  All instances share the same DID and the same private key
+  (retrieved from Vault independently by each instance).
+  No coordination between instances is required for auth.
+end note
+
+== New instance starts and bootstraps ==
+
+ops -> instN: Launch pod (HPA scale-out event)
+
+instN -> vault: Authenticate (K8s SA token)\nvault.auth.kubernetes.login(role="sentinel-prod-consumer-app")
+vault --> instN: Vault token (TTL=1h)
+
+instN -> vault: Read private key\nPath: secret/sentinel/prod/consumer-app/private_key
+vault --> instN: private_key_bytes
+instN -> instN: Compute DID → same DID as inst1\n(same key = same identity)
+
+instN -> disc: GET /api/v1/config (mTLS)\nX-Sentinel-DID: did:key:z6Mk<SHARED_DID>
+disc -> disc: Look up Sentinel by DID → ACTIVE
+disc --> instN: 200 OK signed config bundle
+instN -> instN: Verify config bundle → apply
+
+instN -> redis: PING (test connectivity)
+redis --> instN: PONG
+
+instN -> disc: POST /api/v1/sentinels/heartbeat\n{ "did": "did:key:z6Mk<DID>",\n  "instance_id": "<uuid>",\n  "env": "prod" }
+disc --> instN: 200 OK { "status": "ACTIVE" }
+
+== Ready: Instance N starts handling requests ==
+
+note over inst1, instN
+  Both instances share:
+  - Same DID (same identity)
+  - Same private key (same signing capability)
+  - Same Redis (shared JTI replay cache)
+  
+  JTI deduplication works correctly:
+  A JTI seen by inst1 is in Redis;
+  if the same token arrives at instN, Redis SETNX
+  returns 0 (already exists) → rejected.
+  
+  No cross-instance coordination needed for VP verification.
+  Each instance verifies independently.
+end note
+
+instN -> disc: Periodic config refresh (every CONF_REFRESH_INTERVAL)\nPeriodic status list refresh
+
+note over chain
+  SentinelRegistry records one entry per service DID,
+  not per instance. Instance count is transparent to blockchain.
+  The ACTIVE DID entry covers all N instances.
+end note
+
+@enduml

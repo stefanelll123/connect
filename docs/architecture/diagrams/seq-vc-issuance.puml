@@ -1,0 +1,43 @@
+@startuml seq-vc-issuance
+title VC Issuance Flow
+
+participant "Consumer Sentinel" as sentinel
+participant "Discovery API" as disc
+participant "Discovery DB" as db
+participant "Vault (Discovery)" as vault
+participant "IssuerRegistry\n(Blockchain)" as chain
+
+== Consumer Sentinel requests an AccessGrantCredential ==
+
+sentinel -> disc: POST /api/v1/credentials\n{\n  "consumer_did": "did:key:z6Mk<CONSUMER>",\n  "producer_service_id": "citizen-data",\n  "env": "prod",\n  "scope": ["service:citizen-data:read"],\n  "requested_validity_days": 30\n}\nAuthorization: Bearer <sentinel-session-token>
+
+disc -> db: SELECT sentinels WHERE did=consumer_did AND status=ACTIVE
+db --> disc: consumer record
+disc -> db: SELECT services WHERE service_id=producer_service_id AND env=prod
+db --> disc: producer record
+
+disc -> chain: issuerRegistry.isActive(discovery_did)
+chain --> disc: true
+
+disc -> chain: sentinelRegistry.isRegistered\n(consumer_did, env=prod)
+chain --> disc: true
+
+disc -> disc: Compute validity:\n  nbf = now\n  exp = nbf + 30 days\n  jti = urn:uuid:<uuid>
+
+disc -> disc: Build credentialStatus:\n  statusListIndex = next_available_index\n  statusListCredential = /status/list-001
+
+disc -> vault: Read issuer signing key\nsecret/issuers/prod/signing_key
+vault --> disc: private_key_bytes
+
+disc -> disc: Assemble JWT-VC payload:\n  iss = discovery_did\n  sub = consumer_did\n  nbf, exp, jti\n  vc.type = [VC, AccessGrantCredential]\n  vc.credentialSubject = {\n    id: consumer_did,\n    env: "prod",\n    aud: producer_sentinel_did,\n    scope: [...],\n    service_id: "citizen-data"\n  }\n  vc.credentialStatus = {...}
+
+disc -> disc: sign_jws(payload, issuer_key)\n→ compact JWT-VC
+
+disc -> db: INSERT credentials\n{ jti, consumer_did, producer_service_id,\n  status_list_index, env, issued_at, expires_at }
+disc -> db: INSERT audit_log\n{ action=VC_ISSUED, iss, sub, jti }
+
+disc --> sentinel: 201 Created\n{\n  "credential": "<compact-jwt-vc>",\n  "jti": "urn:uuid:...",\n  "expires_at": "ISO8601"\n}
+
+sentinel -> sentinel: Store JWT-VC in memory /\nrequest re-issue before expiry
+
+@enduml

@@ -1,0 +1,104 @@
+{
+  "id": "TASK-063",
+  "title": "Observability Stack: OTel Collector, Prometheus Scraping, Grafana Alloy (Log Collection), Grafana Dashboards, Alert Rules",
+  "component": "infra/observability",
+  "status": "pending",
+  "description": "Deploy the complete observability stack for the decentralized sentinel platform. Use OpenTelemetry Collector for OTLP ingestion and trace routing. Use Grafana Alloy (NOT Promtail — EOL March 2026) for log collection. Deploy Prometheus for metrics scraping and Grafana for visualization. Define 5 pre-built dashboards and 5 alerting rule groups covering issuer trust, revocation staleness, replay attacks, chain indexer lag, and onboarding failures.",
+  "objectives": [
+    "Deploy OTel Collector via Helm with OTLP gRPC/HTTP receivers, Prometheus exporter, Loki exporter",
+    "Deploy Grafana Alloy for log collection (replaces Promtail — EOL Mar 2026) with pipeline processing",
+    "Deploy Prometheus with service discovery scraping /metrics endpoints from all components",
+    "Deploy Loki for log aggregation (backend for Alloy-shipped logs)",
+    "Deploy Grafana with 5 pre-configured datasources and 5 pre-built dashboards",
+    "Define Prometheus AlertManager rules for 5 critical incident categories"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      {
+        "step": 1,
+        "title": "OTel Collector deployment",
+        "detail": "File: `infra/observability/otelcollector/config.yaml`. Use `open-telemetry/opentelemetry-collector-contrib` Helm chart. Config: receivers: `otlp` (grpc: 4317, http: 4318). processors: `batch` (send_batch_size: 10000, timeout: 5s), `memory_limiter` (limit_mib: 512, spike_limit_mib: 128), `resource` (add attributes: cluster, environment). exporters: `prometheus` (endpoint: 0.0.0.0:8889 — Prometheus pull mode), `otlp/tempo` (endpoint: tempo:4317 for traces), `loki` (endpoint: http://loki:3100/loki/api/v1/push). service.pipelines: traces → batch → tempo. metrics → batch → prometheus. logs → batch → loki. Set resource detection processor to add k8s attributes (namespace, pod name, node name)."
+      },
+      {
+        "step": 2,
+        "title": "Grafana Alloy configuration (log collection)",
+        "detail": "File: `infra/observability/alloy/config.alloy`. Alloy uses River configuration language. Define `discovery.kubernetes` component to find pods with annotation `sentinel.io/log-collection: enabled`. Define `loki.source.kubernetes_logs` to tail pod logs. Define processing pipeline: `loki.process` component with stages: JSON parsing (sentinel logs are JSON), label extraction (service_id, env, event, decision, level), limit labels (drop raw payload). Forward to `loki.write` exporter pointing to Loki endpoint. For sentinel UI logs: also collect from file (`/app/logs/*.log`) via `local.file_match` + `loki.source.file` for pods with volume-mounted log files. Note: Alloy replaces Promtail entirely — same DaemonSet pattern but with Alloy binary."
+      },
+      {
+        "step": 3,
+        "title": "Prometheus configuration and service discovery",
+        "detail": "File: `infra/observability/prometheus/values.yaml` for kube-prometheus-stack Helm chart. Set `serviceMonitor` resources for Discovery and Sentinel — add ServiceMonitor CRDs: `spec.endpoints[].path: /metrics`, port: metrics, interval: 15s, `scrapeTimeout: 10s`. Add external scrape job for OTel Collector's Prometheus exporter at `:8889/metrics`. Static labels added via `honorLabels: false` and relabelings: add `env` and `cluster` labels from pod annotations. Retention: 30d for prod (configurable). Enable remote_write to long-term storage (Thanos or VictoriaMetrics if available)."
+      },
+      {
+        "step": 4,
+        "title": "Grafana dashboards",
+        "detail": "Dashboard 1 — Sentinel Operations (`infra/observability/grafana/dashboards/sentinel-ops.json`): panels: request rate (inbound + outbound), deny rate by reason (stacked bar), latency p50/p95/p99 (histogram_quantile), replay rejections/minute, active SSE connections. Dashboard 2 — Revocation & Trust (`sentinel-trust.json`): issuer trust cache hits/misses, status list staleness gauge (vs. Δ threshold), revocation check latency, status list refresh failures. Dashboard 3 — Chain Events (`sentinel-chain.json`): block lag vs. chain head, chain RPC latency, IssuerRegistry events/hour, indexer caught-up status. Dashboard 4 — Security Incidents (`sentinel-security.json`): issuer disabled events, onboarding failures/hour, proof verification failures, VP validation failures by error code. Dashboard 5 — Discovery Service (`sentinel-discovery.json`): API request rate by path+status, enrollment queue depth, registration DB write latency, credential issuance rate."
+      },
+      {
+        "step": 5,
+        "title": "Alert rules — 5 critical categories",
+        "detail": "File: `infra/observability/prometheus/alert-rules.yaml`. Rule group 1 — Issuer Trust: `IssuerDisabledOnChain`: ALERT when `sum(rate(sentinel_chain_issuer_disabled_total[5m])) > 0`, severity: critical, for: 0m (immediate), annotation: 'Issuer disabled on-chain — all VCs from this issuer will be rejected'. Runbook URL in annotation. Rule group 2 — Revocation Staleness: `StatusListStale`: ALERT when `sentinel_status_list_age_seconds > sentinel_status_list_delta_threshold_seconds * 1.1`, severity: warning. If stale > 2× threshold: critical. Rule group 3 — Replay Spike: `ReplayRejectionSpike`: ALERT when `rate(sentinel_replay_rejects_total[5m]) > 5`, severity: warning; > 20: critical (possible DDoS or replay attack). Rule group 4 — Chain Indexer Lag: `ChainIndexerLag`: ALERT when `sentinel_chain_indexer_lag_blocks > 50`, severity: warning; > 200 blocks: critical. Rule group 5 — Onboarding Failures: `OnboardingFailureSpike`: ALERT when `rate(discovery_enrollment_failures_total[10m]) > 5`, severity: warning (could indicate registration spam or chain issues)."
+      },
+      {
+        "step": 6,
+        "title": "AlertManager routing configuration",
+        "detail": "File: `infra/observability/alertmanager/config.yaml`. Routes: severity=critical → pagerduty/oncall integration (or generic webhook). severity=warning → Slack/Teams channel. group_by: [alertname, env, service_id]. group_wait: 30s, group_interval: 5m, repeat_interval: 4h. Inhibit rules: if IssuerDisabledOnChain is firing, inhibit downstream StatusListStale for same service (chain outage should not generate duplicate alerts). Dead man's switch: Prometheus `SentinelWatchdog` alert always firing — if it stops, AlertManager pings healthcheck.io (proves monitoring is alive)."
+      },
+      {
+        "step": 7,
+        "title": "Grafana datasource and dashboard provisioning",
+        "detail": "Use Grafana provisioning via ConfigMaps. File: `infra/observability/grafana/provisioning/datasources.yaml`. Datasource definitions: Prometheus (url: http://prometheus:9090, default: true), Loki (url: http://loki:3100), Tempo (url: http://tempo:3200, tracesToLogs: enable derived fields linking trace to Loki logs). File: `infra/observability/grafana/provisioning/dashboards.yaml`. Point to `/var/lib/grafana/dashboards/` folder. Mount all JSON dashboard files via ConfigMap into `/var/lib/grafana/dashboards/`. Set `disableDeletion: true` and `updateIntervalSeconds: 0` for managed dashboards (prevent UI edits overwriting provisioned dashboards)."
+      },
+      {
+        "step": 8,
+        "title": "Loki deployment and log retention",
+        "detail": "Deploy Loki in single-binary mode for dev/staging using official Helm chart. For prod: use Loki distributed mode (separate querier/ingester). Configure log retention: `limits_config.retention_period: 30d`. Index period: `boltdb_shipper` or `tsdb_shipper` (tsdb preferred). Stream labels (indexed): `{env, service_id, level, event}` — keep small label set to avoid cardinality explosion from trace_id or jti_hash. Alert: do NOT index fields that change per-request (trace_id, request_id) — use LogQL filter `|= \"jti_hash=abc\"` instead. Enable Loki compactor for retention enforcement."
+      }
+    ]
+  },
+  "project_structure": {
+    "files": {
+      "infra/observability/otelcollector/config.yaml": "OTel Collector configuration (OTLP → Tempo/Prometheus/Loki)",
+      "infra/observability/otelcollector/values.yaml": "Helm values for OTel Collector chart",
+      "infra/observability/alloy/config.alloy": "Grafana Alloy River config (k8s log discovery + pipeline)",
+      "infra/observability/alloy/values.yaml": "Helm values for Grafana Alloy chart",
+      "infra/observability/prometheus/values.yaml": "kube-prometheus-stack values",
+      "infra/observability/prometheus/alert-rules.yaml": "Custom PrometheusRule CRDs",
+      "infra/observability/alertmanager/config.yaml": "AlertManager routing config",
+      "infra/observability/loki/values.yaml": "Loki Helm values with retention config",
+      "infra/observability/grafana/provisioning/datasources.yaml": "Prometheus + Loki + Tempo datasources",
+      "infra/observability/grafana/provisioning/dashboards.yaml": "Dashboard folder config",
+      "infra/observability/grafana/dashboards/sentinel-ops.json": "Operations dashboard",
+      "infra/observability/grafana/dashboards/sentinel-trust.json": "Revocation & Trust dashboard",
+      "infra/observability/grafana/dashboards/sentinel-chain.json": "Chain Events dashboard",
+      "infra/observability/grafana/dashboards/sentinel-security.json": "Security Incidents dashboard",
+      "infra/observability/grafana/dashboards/sentinel-discovery.json": "Discovery Service dashboard"
+    }
+  },
+  "domain_entities": [
+    {
+      "name": "Alert",
+      "fields": "alertname, severity, for_duration, labels (env, service_id), annotations (summary, description, runbook_url)"
+    },
+    {
+      "name": "DashboardPanel",
+      "fields": "title, type (graph/gauge/table/stat), query (PromQL or LogQL), unit, thresholds"
+    }
+  ],
+  "security_constraints": [
+    "Grafana admin credentials stored in Kubernetes Secret (not in values.yaml) — use Vault or Kubernetes External Secrets to inject",
+    "Grafana: enable CSRF protection (`csrf_trusted_origins`), set strict cookie flags (`cookie_secure: true`, `cookie_samesite: strict`)",
+    "No raw request payloads, JWT tokens, or DIDs stored in log streams — enforced by Alloy processing pipeline dropping such fields",
+    "Prometheus: enable `--web.enable-admin-api=false` (no remote admin API) in prod to prevent accidental data deletion",
+    "Loki: enable authentication (basic auth or OIDC) for prod — no anonymous read access to logs"
+  ],
+  "dependencies": ["TASK-012", "TASK-036", "TASK-052", "TASK-062"],
+  "acceptance_criteria": [
+    "All 5 dashboards load in Grafana with data after test traffic generated",
+    "Alert rules evaluated correctly: firing IssuerDisabledOnChain within 1m of on-chain event",
+    "Grafana Alloy DaemonSet running on all nodes, logs flowing to Loki with correct labels",
+    "OTel Collector /metrics endpoint scraped by Prometheus (verify in Prometheus targets page)",
+    "Trace correlation: clicking trace_id in Grafana Explore links to correct Loki log lines",
+    "Replay rejection spike alert fires when replay_rejects_total rate exceeds threshold in staging test"
+  ]
+}

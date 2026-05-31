@@ -1,0 +1,88 @@
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "UP",   # pyupgrade
+    "N",    # pep8-naming
+    "ANN",  # flake8-annotations
+    "S",    # flake8-bandit (security)
+    "BLE",  # flake8-blind-except
+    "FBT",  # flake8-boolean-trap
+    "T20",  # flake8-print
+    "SIM",  # flake8-simplify
+    "ARG",  # flake8-unused-arguments
+    "PTH",  # flake8-use-pathlib
+    "PL",   # pylint
+    "TRY",  # tryceratops
+    "PERF", # perflint
+]
+ignore = [
+    "ANN101",  # missing self type annotation
+    "ANN102",  # missing cls type annotation
+    "TRY003",  # long exception messages
+    "PLR2004", # magic value comparison
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "ANN", "ARG", "PLR"]
+"**/tests/**" = ["S101", "ANN", "ARG", "PLR"]
+"**/conftest.py" = ["S101", "ANN"]
+"scripts/**" = ["T20", "ANN"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+disallow_untyped_defs = true
+disallow_any_generics = true
+no_implicit_reexport = true
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = [
+    "web3.*",
+    "eth_account.*",
+    "eth_typing.*",
+    "joserfc.*",
+    "multibase.*",
+    "multiformats.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "libs", "services"]
+asyncio_mode = "auto"
+addopts = [
+    "--cov=src",
+    "--cov-report=html:htmlcov",
+    "--cov-report=xml:coverage.xml",
+    "--cov-report=term-missing",
+    "--cov-fail-under=80",
+    "-v",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning:web3",
+    "ignore::DeprecationWarning:eth_utils",
+]
+
+[tool.coverage.run]
+source = ["src"]
+omit = ["*/tests/*", "*/conftest.py"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false

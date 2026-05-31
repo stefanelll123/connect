@@ -1,0 +1,56 @@
+replicaCount: 3
+
+image:
+  tag: ""  # set by CD pipeline --set image.tag=<sha>
+
+vault:
+  enabled: true
+
+tls:
+  enabled: true
+
+hpa:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 60
+
+ingress:
+  enabled: true
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+  hosts:
+    - host: discovery.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: discovery-prod-tls
+      hosts:
+        - discovery.example.com
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    cpu: 2000m
+    memory: 1Gi
+
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: sentinel-discovery
+          topologyKey: kubernetes.io/hostname
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+env:
+  DEPLOYMENT_ENVIRONMENT: production

@@ -1,0 +1,105 @@
+{
+  "id": "TASK-014",
+  "title": "IssuerRegistry Smart Contract: DID-to-Issuer Trust Mapping On-Chain",
+  "component": "contracts",
+  "status": "not-started",
+  "description": "Implement the IssuerRegistry Solidity smart contract. This contract stores a mapping from DID strings to their trust status and metadata. It allows a governance admin (owner) to register, update, and revoke trusted issuers. Sentinel nodes query this contract to determine whether a credential's issuer is trusted before accepting VCs.",
+  "objectives": [
+    "On-chain authoritative list of trusted VC issuers",
+    "OpenZeppelin AccessControl for role-based management (ISSUER_ADMIN_ROLE)",
+    "Events emitted for all state changes — used by Python event indexer (TASK-020)",
+    "Read-only functions do not modify state — usable by any web3 client"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      "Step 1 - Contract Declaration: pragma solidity ^0.8.25;. Inherits: AccessControl (OpenZeppelin v5), Pausable (OpenZeppelin v5). Define bytes32 constant ISSUER_ADMIN_ROLE = keccak256('ISSUER_ADMIN_ROLE');",
+      "Step 2 - IssuerRecord Struct: struct IssuerRecord { string did; string name; string description; uint256 registeredAt; uint256 updatedAt; bool active; string metadataURI; }. metadataURI is an optional IPFS CID or HTTPS URL with extended issuer metadata — NOT used for trust decisions, informational only.",
+      "Step 3 - Storage: mapping(bytes32 => IssuerRecord) private _issuers; where the key is keccak256(abi.encodePacked(did)). Array of issuer DID hashes for enumeration: bytes32[] private _issuerKeys. mapping(bytes32 => uint256) private _issuerKeyIndex; (for O(1) deletion from array).",
+      "Step 4 - Events: event IssuerRegistered(bytes32 indexed didHash, string did, string name, address indexed registeredBy); event IssuerRevoked(bytes32 indexed didHash, string did, address indexed revokedBy); event IssuerUpdated(bytes32 indexed didHash, string did, address indexed updatedBy);",
+      "Step 5 - registerIssuer(string calldata did, string calldata name, string calldata description, string calldata metadataURI): onlyRole(ISSUER_ADMIN_ROLE). Validate: did length > 0 and <= 2048. Compute didHash. Require: !_issuers[didHash].active (duplicate check). Set IssuerRecord with block.timestamp. Push to _issuerKeys. Emit IssuerRegistered.",
+      "Step 6 - revokeIssuer(string calldata did): onlyRole(ISSUER_ADMIN_ROLE). Compute didHash. Require: _issuers[didHash].active. Set active=false, updatedAt=block.timestamp. Swap-and-pop from _issuerKeys array. Emit IssuerRevoked.",
+      "Step 7 - updateIssuer(string calldata did, string calldata name, string calldata description, string calldata metadataURI): onlyRole(ISSUER_ADMIN_ROLE). Require issuer exists and is active. Update fields (cannot change did). Set updatedAt=block.timestamp. Emit IssuerUpdated.",
+      "Step 8 - Read Functions: isIssuerActive(string calldata did) returns (bool) — pure view, no auth required. getIssuer(string calldata did) returns (IssuerRecord memory) — view, no auth. getIssuerCount() returns (uint256). getIssuerAtIndex(uint256 index) returns (IssuerRecord memory) — for enumeration by Python indexer.",
+      "Step 9 - IIssuerRegistry Interface: Define in contracts/interfaces/IIssuerRegistry.sol. Export all external functions. Python client and other contracts always interact via the interface, not the concrete type.",
+      "Step 10 - Constructor: constructor(address initialAdmin). grantRole(DEFAULT_ADMIN_ROLE, initialAdmin). grantRole(ISSUER_ADMIN_ROLE, initialAdmin). DEFAULT_ADMIN_ROLE allows managing role assignments.",
+      "Step 11 - pauseRegistry() / unpauseRegistry(): onlyRole(DEFAULT_ADMIN_ROLE). whenNotPaused modifier on registerIssuer and updateIssuer. revokeIssuer should work even when paused (emergency revocation)."
+    ],
+    "project_structure": {
+      "files": {
+        "contracts/contracts/Registries/IssuerRegistry.sol": "Main contract",
+        "contracts/contracts/interfaces/IIssuerRegistry.sol": "Interface",
+        "contracts/test/IssuerRegistry.test.ts": "Hardhat tests"
+      }
+    },
+    "domain_entities": [
+      {
+        "name": "IssuerRecord",
+        "type": "Solidity struct",
+        "fields": [
+          {"name": "did", "type": "string"},
+          {"name": "name", "type": "string"},
+          {"name": "description", "type": "string"},
+          {"name": "registeredAt", "type": "uint256", "description": "Unix timestamp"},
+          {"name": "updatedAt", "type": "uint256"},
+          {"name": "active", "type": "bool"},
+          {"name": "metadataURI", "type": "string"}
+        ]
+      }
+    ],
+    "data_structures": {
+      "event_log_example": {
+        "event": "IssuerRegistered",
+        "args": {
+          "didHash": "0x3d4f2c91...",
+          "did": "did:key:z6Mkf5rGMoatrSj1f4CyvuHBeXJELe9y84SB5idYrnfo4Sd6",
+          "name": "Ministry of Interior DID Issuer",
+          "registeredBy": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+        },
+        "blockNumber": 1542,
+        "transactionHash": "0xabc123..."
+      }
+    },
+    "error_handling": {
+      "custom_errors": [
+        "error IssuerAlreadyRegistered(bytes32 didHash);",
+        "error IssuerNotFound(bytes32 didHash);",
+        "error IssuerAlreadyRevoked(bytes32 didHash);",
+        "error InvalidDID(string reason);"
+      ]
+    },
+    "interface_contracts": {
+      "IIssuerRegistry": {
+        "isIssuerActive": "function isIssuerActive(string calldata did) external view returns (bool)",
+        "getIssuer": "function getIssuer(string calldata did) external view returns (IssuerRecord memory)",
+        "registerIssuer": "function registerIssuer(string calldata did, string calldata name, string calldata description, string calldata metadataURI) external",
+        "revokeIssuer": "function revokeIssuer(string calldata did) external"
+      }
+    },
+    "security_constraints": [
+      "Use OpenZeppelin AccessControl — do not implement custom role system",
+      "DID string length validated on-chain: max 2048 bytes to prevent gas griefing",
+      "Swap-and-pop pattern for array deletion to prevent O(n) gas costs",
+      "No msg.value — this contract is not payable, add nonpayable checks",
+      "Emit events for ALL state changes — required for off-chain indexing",
+      "Constructor sets DEFAULT_ADMIN_ROLE to initialAdmin — do not hardcode any address",
+      "No selfdestruct — upgradeability handled separately (TASK-018)"
+    ]
+  },
+  "technical_requirements": [
+    "Solidity 0.8.25",
+    "@openzeppelin/contracts 5.x AccessControl, Pausable",
+    "Gas optimization: use bytes32 keys in mappings, not strings"
+  ],
+  "dependencies": [
+    "TASK-013"
+  ],
+  "acceptance_criteria": [
+    "Compiles without warnings with solidity 0.8.25 optimizer 200 runs",
+    "registerIssuer emits IssuerRegistered event",
+    "revokeIssuer emits IssuerRevoked and sets active=false",
+    "isIssuerActive returns false after revocation",
+    "Non-admin cannot call registerIssuer (AccessControl enforced)",
+    "Duplicate DID registration reverts with IssuerAlreadyRegistered",
+    "All test cases pass in npx hardhat test"
+  ]
+}

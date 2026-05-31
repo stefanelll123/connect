@@ -1,0 +1,32 @@
+replicaCount: 1
+
+image:
+  tag: "dev"
+  pullPolicy: IfNotPresent
+
+vault:
+  enabled: false
+
+tls:
+  enabled: false
+
+hpa:
+  enabled: false
+
+persistence:
+  enabled: false
+
+ingress:
+  enabled: false
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+env:
+  DEPLOYMENT_ENVIRONMENT: dev
+  DISCOVERY_CORS_ORIGINS: "http://localhost:3000"

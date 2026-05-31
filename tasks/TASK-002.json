@@ -1,0 +1,92 @@
+{
+  "id": "TASK-002",
+  "title": "Complete Threat Model and Security Standards Mapping for Applications and Services",
+  "component": "security",
+  "status": "not-started",
+  "description": "Build a practical, implementation-oriented threat model covering assets, adversaries, attack surfaces, and concrete attacks for all system flows: registration, onboarding, request signing, VC/VP verification, revocation, Sentinel migration, multi-instance, and blockchain reorg/outage. Produce actionable mitigations with test criteria and map to OWASP ASVS.",
+  "objectives": [
+    "Explicitly cover required threats: rogue registration, spoofing, replay, leakage, key compromise, malicious registration",
+    "Define controls and tests for each attack class",
+    "Establish default policies (fail-closed vs. degrade) for outage scenarios"
+  ],
+  "implementation_guidance": {
+    "overview": "Apply STRIDE to each flow from TASK-001's sequence diagrams and produce a comprehensive threat table. Each threat maps to a mitigation and a testable criterion. Include an Outage & Staleness chapter that formalizes Δ behavior.",
+    "steps": [
+      "Step 1 - Asset Catalogue: List all assets with sensitivity classification. Assets must include: (a) Sentinel private DID keys (SECRET), (b) Issuer signing keys (SECRET), (c) Verifiable Credentials (INTERNAL), (d) Config bundles (INTERNAL), (e) Enrollment tokens (SECRET while unused), (f) Status lists (PUBLIC), (g) Discovery registry DB (INTERNAL), (h) Blockchain RPC credentials (SECRET), (i) Audit log (INTERNAL), (j) mTLS certificates (SECRET).",
+      "Step 2 - Adversary Catalogue: Define each adversary with capabilities and goals: (a) Insider Admin — full system access to Discovery; goal: issue unauthorized VCs; (b) Network Attacker — On-path between Sentinels; goal: replay or modify requests; (c) Compromised Consumer Sentinel — valid DID but attacker-controlled; goal: escalate scope; (d) Compromised Discovery — can modify registry and issue enrollment tokens; goal: register rogue Sentinels; (e) Compromised Issuer — can issue fraudulent VCs; goal: grant unauthorized access; (f) Rogue Sentinel — attempts to register without valid enrollment; goal: appear as a legitimate producer.",
+      "Step 3 - STRIDE Application: For each flow in TASK-001 sequences, apply STRIDE (Spoofing, Tampering, Repudiation, Information Disclosure, Denial of Service, Elevation of Privilege). Produce a table with columns: Flow | Component | Threat Category | Threat Description | Impact (High/Med/Low) | Likelihood (High/Med/Low) | Mitigation | Test ID.",
+      "Step 4 - Populate Threat Table: Include at minimum the following threats: T-001 Replay of ProofClaims JWS to Producer; T-002 Rogue Sentinel registration with forged token; T-003 Cross-environment VC usage (dev VC in prod); T-004 Stale status list acceptance after revocation; T-005 Enrollment token theft and reuse; T-006 Issuer key compromise enabling mass VC forgery; T-007 Consumer Sentinel DID key theft; T-008 Discovery compromise enabling endpoint injection; T-009 Blockchain reorg causing stale trust state; T-010 Config bundle tampering in transit.",
+      "Step 5 - Outage & Staleness Chapter: Formalize parameter Δ (bounded-freshness window). Define: (a) What triggers stale mode (now - last_status_anchor_age > Δ), (b) Behavior options: FAIL_CLOSED (reject all requests), FAIL_OPEN_DEGRADED (allow with reduced privilege), ALLOW_CACHED (continue using cached status within max_cache_age). Define which mode applies per credential sensitivity level. Document that FAIL_CLOSED is the secure default.",
+      "Step 6 - Map to OWASP ASVS: For each ASVS category (V1–V14), list which controls apply to this system. Minimum required ASVS mappings: V2 Authentication (enrollment token validation), V3 Session (mTLS and token lifecycle), V5 Validation (VC schema validation, anti-injection), V7 Cryptography (signing algorithms, key management), V9 Communications (TLS/mTLS requirements), V10 Malicious Code (dependency scanning), V14 Configuration (secure defaults).",
+      "Step 7 - Traceability Matrix: Create a matrix linking each threat (T-xxx) to its mitigation implementation task (TASK-xxx) and test (TEST-xxx from TASK-065)."
+    ],
+    "project_structure": {
+      "description": "Output files for this task",
+      "files": [
+        "docs/security/threat-model.md — main threat model document",
+        "docs/security/threat-table.csv — machine-readable threat table",
+        "docs/security/asvs-mapping.md — OWASP ASVS control mapping",
+        "docs/security/outage-policy.md — formalization of Δ and outage decision policies",
+        "docs/security/traceability-matrix.md — threat to task to test mapping"
+      ]
+    },
+    "data_structures": {
+      "threat_record": {
+        "description": "Standard record for each identified threat",
+        "fields": {
+          "id": "string — e.g., T-001",
+          "flow": "string — the flow from TASK-001 (e.g., seq-request-execution)",
+          "component": "string — which component is vulnerable",
+          "stride_category": "enum — S|T|R|I|D|E",
+          "description": "string — precise description of the attack",
+          "impact": "enum — HIGH|MEDIUM|LOW",
+          "likelihood": "enum — HIGH|MEDIUM|LOW",
+          "mitigation": "string — exact mitigation control",
+          "impl_task": "string — e.g., TASK-006",
+          "test_id": "string — e.g., TEST-E2E-005"
+        }
+      },
+      "outage_policy": {
+        "description": "Formalized outage behavior structure",
+        "example": {
+          "trigger": "now - status_anchor_updated_at > delta_seconds",
+          "delta_default_prod_seconds": 600,
+          "delta_default_dev_seconds": 3600,
+          "mode": "FAIL_CLOSED",
+          "degraded_privilege_scopes_allowed": [],
+          "alert": true,
+          "metric": "status_stale_total"
+        }
+      }
+    },
+    "security_constraints": [
+      "Each threat MUST have a corresponding mitigation and at least one testable criterion",
+      "Δ value MUST be configurable per environment and fetched from TrustPolicyRegistry on-chain (TASK-015) or from signed config bundle",
+      "Cross-environment replay (using dev VC in prod) MUST be listed as an explicit threat and mitigated by env-bound VP proof",
+      "Discovery compromise MUST be modeled — the system must remain secure even if Discovery is attacker-controlled, because Sentinels enforce trust independently",
+      "All secrets in the threat model MUST be classified SECRET and not appear in log samples or examples"
+    ],
+    "interface_contracts": {
+      "threat_to_task_traceability": {
+        "description": "Every threat mitigation must reference its implementation task",
+        "format": "T-{NNN} -> TASK-{NNN}: {mitigation_description}"
+      }
+    }
+  },
+  "technical_requirements": [
+    "STRIDE threat modeling methodology",
+    "OWASP Application Security Verification Standard (ASVS) v4.0 or later",
+    "Markdown format for documents with embedded tables"
+  ],
+  "dependencies": [
+    "TASK-001"
+  ],
+  "acceptance_criteria": [
+    "A Threat → Mitigation → Test table exists covering all critical flows",
+    "Each threat record contains: ID, flow, STRIDE category, impact, likelihood, mitigation, implementation task reference, and test reference",
+    "Explicit fail-closed/degrade decisions exist for every outage scenario",
+    "The traceability matrix links every threat mitigation to an implementation task",
+    "OWASP ASVS mapping covers at minimum V2, V3, V5, V7, V9, V10, V14",
+    "Cross-environment replay is explicitly modeled and mitigated"
+  ]
+}

@@ -1,0 +1,86 @@
+replicaCount: 2
+
+image:
+  registry: ghcr.io
+  repository: your-org/discovery
+  tag: "latest"
+  pullPolicy: Always
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8000
+
+ingress:
+  enabled: false
+  className: "nginx"
+  annotations: {}
+  hosts:
+    - host: discovery.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+
+hpa:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
+
+autoscaling:
+  enabled: false
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Vault Agent Injector
+vault:
+  enabled: false
+  role: "discovery-service"
+  secrets:
+    db: "database/creds/discovery-db"
+    signingKey: "secret/data/discovery/jwt-key"
+
+# cert-manager mTLS
+tls:
+  enabled: false
+  issuerRef:
+    kind: ClusterIssuer
+    name: sentinel-internal-ca
+  secretName: discovery-tls
+
+persistence:
+  enabled: false
+
+env:
+  DEPLOYMENT_ENVIRONMENT: production
+  DISCOVERY_HOST: "0.0.0.0"
+  DISCOVERY_PORT: "8000"
+  OTEL_ENABLED: "true"
+
+# Non-sensitive config (sensitive comes from Vault)
+config:
+  logLevel: "INFO"
+  corsOrigins: ""
+  blockchainChainId: "1"

@@ -1,0 +1,23 @@
+services:
+  postgres:
+    environment:
+      POSTGRES_DB: discovery_test
+    ports:
+      - "5433:5432"
+
+  redis:
+    ports:
+      - "6380:6379"
+
+  discovery:
+    environment:
+      POSTGRES_DB: discovery_test
+      DISCOVERY_ENV: test
+
+  sentinel-producer:
+    environment:
+      SENTINEL_ENV: test
+
+  sentinel-consumer:
+    environment:
+      SENTINEL_ENV: test

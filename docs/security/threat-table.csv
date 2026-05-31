@@ -1,0 +1,14 @@
+id,flow,component,stride_category,description,impact,likelihood,mitigation,impl_task,test_id
+T-001,seq-request-execution,Producer Sentinel,R,ProofClaims JWS replay — attacker replays a captured request within the 30-second exp window,HIGH,HIGH,JTI dedup cache (Redis SETNX TTL=30s) + req hash binding + exp<iat+30,TASK-006,TEST-INT-001
+T-002,seq-sentinel-onboarding,Discovery,S,Rogue Sentinel registration with stolen or forged enrollment token,HIGH,MEDIUM,One-time use token + 128-bit UUID entropy + 1h expiry + mTLS onboarding channel,TASK-005,TEST-INT-002
+T-003,seq-request-execution,Producer Sentinel,E,Cross-environment VC replay — using a dev VC in prod,HIGH,MEDIUM,env claim verification at Step 7 + separate DIDs per env (ADR-007),TASK-003,TEST-UNIT-003
+T-004,All verification flows,Producer Sentinel,I,Stale status list acceptance after revocation,HIGH,MEDIUM,Delta-bounded freshness + FAIL_CLOSED on stale cache + on-chain hash anchor,TASK-007,TEST-INT-004
+T-005,seq-sentinel-onboarding,Discovery,S,Enrollment token theft during transmission,HIGH,LOW,mTLS transmission + one-time use + Vault storage,TASK-005,TEST-INT-005
+T-006,seq-vc-issuance,Discovery/Issuer,E,Issuer key compromise enabling mass VC forgery,CRITICAL,LOW,IssuerRegistry.disableIssuer on-chain + Sentinels check isActive per request (SI-005),TASK-003,TEST-E2E-006
+T-007,All flows,Consumer Sentinel,S,Consumer Sentinel DID key theft from memory or Vault,HIGH,LOW,Keys in Vault only + Vault audit log + no plaintext disk writes (SI-009),TASK-008,AUDIT-001
+T-008,seq-sentinel-onboarding,Consumer Sentinel,T,Discovery compromise enabling endpoint injection via malicious config bundle,HIGH,LOW,Config bundle JWS signature verified before application (SI-012),TASK-008,TEST-UNIT-008
+T-009,seq-revocation,Blockchain,D,Blockchain reorg reverting issuer-disable transaction,MEDIUM,LOW,Require 12 block confirmations for registry writes + cached verified state,TASK-015,TEST-INT-009
+T-010,seq-sentinel-onboarding,Consumer Sentinel,T,Config bundle tampering in transit,MEDIUM,LOW,JWS signature verification + reject if invalid (SI-012),TASK-008,TEST-UNIT-010
+T-011,All verification flows,Producer Sentinel,T,JWT alg:none attack bypassing signature verification,CRITICAL,LOW,Explicit PROHIBITED_ALGS check before any crypto operation (SI-006),TASK-003,TEST-UNIT-006
+T-012,seq-revocation,Producer Sentinel,T,Status list bitstring substitution or tampering in cache,HIGH,LOW,SHA-256 hash verified against on-chain StatusListAnchor (SI-013),TASK-007,TEST-UNIT-013
+T-013,All verification flows,Producer Sentinel,D,Redis replay cache unavailable allowing double-spend of JTI,MEDIUM,LOW,Redis sentinel/cluster for HA + conservative timeout + reject on Redis error,TASK-006,TEST-INT-013

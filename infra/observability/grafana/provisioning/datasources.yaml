@@ -1,0 +1,47 @@
+apiVersion: 1
+
+datasources:
+  # Primary metrics source
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus
+    url: http://prometheus:9090
+    access: proxy
+    isDefault: true
+    jsonData:
+      timeInterval: 15s
+      httpMethod: GET
+      queryTimeout: 60s
+
+  # Log aggregation
+  - name: Loki
+    type: loki
+    uid: loki
+    url: http://loki:3100
+    access: proxy
+    jsonData:
+      maxLines: 5000
+      derivedFields:
+        # Link trace_id from Loki logs to Tempo traces
+        - matcherRegex: '"trace_id":"([^"]+)"'
+          name: TraceID
+          url: '$${__value.raw}'
+          datasourceUid: tempo
+
+  # Distributed tracing
+  - name: Tempo
+    type: tempo
+    uid: tempo
+    url: http://tempo:3200
+    access: proxy
+    jsonData:
+      tracesToLogs:
+        datasourceUid: loki
+        tags: [service_id, env]
+        filterByTraceID: true
+        spanStartTimeShift: "-1m"
+        spanEndTimeShift: "1m"
+      serviceMap:
+        datasourceUid: prometheus
+      nodeGraph:
+        enabled: true

@@ -1,0 +1,105 @@
+{
+  "id": "TASK-042",
+  "title": "Sentinel: Trust Layer Client (chain read-only, caching issuers/policy/status anchors)",
+  "component": "sentinel/libs/common/trust_layer",
+  "status": "pending",
+  "description": "Implement the Sentinel's read-only blockchain trust layer client. This component reads issuer registry, trust policy parameters, status anchors, and service binding data from the chain (via the async chain client from TASK-020) and provides a multi-tier cache (in-memory + persistent) with configurable TTLs and staleness-fallback behavior. When the RPC node is unavailable, the client must apply the configured OUTAGE_POLICY (fail_closed, degrade_read_only, or use_cache) to ensure predictable behavior under outage conditions.",
+  "objectives": [
+    "Implement TrustLayerClient wrapping the chain client from TASK-020 with caching",
+    "Cache issuers (TTL 60s), policy params (TTL 60s), status anchors (TTL 30s), service bindings (TTL 60s)",
+    "Implement staleness fallback: if RPC down, serve cache if age <= max_cache_age; else apply OUTAGE_POLICY",
+    "Expose pre-verification helper: is_issuer_trusted(issuer_did, schema_id) -> bool with cache",
+    "Expose Prometheus metrics: cache hit ratio, staleness lag (seconds), chain_rpc_errors_total",
+    "Persist cache to disk across restarts to survive sentinel restart during chain outage"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      {
+        "step": 1,
+        "title": "Define cache data models",
+        "detail": "In `cache_models.py` define frozen dataclasses: `IssuerRecord(did, is_active, schemas: list[str], cached_at: float)`, `PolicyParams(max_clock_skew_seconds, revocation_delta_seconds, require_vpq, cached_at: float)`, `StatusAnchor(status_list_id, root_hash, updated_at, cached_at: float)`, `ServiceBinding(service_id, producer_did, env, endpoint, cached_at: float)`. All have `cached_at` float timestamp for TTL calculations."
+      },
+      {
+        "step": 2,
+        "title": "Implement in-memory cache layer",
+        "detail": "Class `MemoryCache` with per-type dicts keyed by canonical identifier (DID, status_list_id, etc.). Use `asyncio.Lock` per cache namespace. On `get(key, ttl)`: return entry if present and `time.time() - cached_at < ttl`, else return None. On `put(key, entry)`: store with current timestamp. Max entries per namespace: 1000 (LRU eviction via `collections.OrderedDict`). Expose `get_all_issuers()` -> list for bulk trusted-issuer set reconstruction. Cache must be thread-safe; all mutating operations under lock."
+      },
+      {
+        "step": 3,
+        "title": "Implement persistent cache layer",
+        "detail": "Class `PersistentCache` that serializes MemoryCache contents to `$SENTINEL_HOME/.sentinel/store/trust_cache.enc` (AES-256-GCM encrypted via SecretStorage from TASK-038) on every `flush()` call and on graceful shutdown. On startup, call `load()` to restore previous state — this allows serving stale-but-present data while first chain sync happens. `flush()` runs every 30s via a background task. If decryption fails (key rotation or corruption), start with empty cache and log WARNING."
+      },
+      {
+        "step": 4,
+        "title": "Implement TrustLayerClient",
+        "detail": "Class `TrustLayerClient` with injected `ChainClient` (TASK-020), `MemoryCache`, `PersistentCache`, `OutagePolicy` enum (FAIL_CLOSED, DEGRADE_READ_ONLY, USE_CACHE). Public async methods: `get_issuer(did) -> IssuerRecord | None`, `get_policy_params() -> PolicyParams`, `get_status_anchor(status_list_id) -> StatusAnchor | None`, `get_service_binding(service_id, env) -> ServiceBinding | None`. Each method: (1) check MemoryCache with type-specific TTL; (2) on miss, call chain; (3) on chain success, update both caches; (4) on chain failure, check persistent cache age vs `max_cache_age_seconds` config; if within max, return stale with WARNING log; else apply OUTAGE_POLICY."
+      },
+      {
+        "step": 5,
+        "title": "Implement staleness control and OUTAGE_POLICY",
+        "detail": "Config via env: `TRUST_CACHE_ISSUER_TTL=60`, `TRUST_CACHE_POLICY_TTL=60`, `TRUST_CACHE_STATUS_ANCHOR_TTL=30`, `TRUST_CACHE_MAX_OUTAGE_AGE=300`, `TRUST_OUTAGE_POLICY=fail_closed`. When chain is unreachable and persistent cache age > TRUST_CACHE_MAX_OUTAGE_AGE: FAIL_CLOSED raises TrustLayerUnavailable; DEGRADE_READ_ONLY returns last known data and sets a `stale=True` flag; USE_CACHE always serves cache regardless of age (not recommended for prod). Log every stale-serve with WARNING including age_seconds."
+      },
+      {
+        "step": 6,
+        "title": "Implement is_issuer_trusted helper",
+        "detail": "Method `async is_issuer_trusted(issuer_did: str, schema_id: str | None = None) -> bool`. Steps: (1) call `get_issuer(issuer_did)`, return False if not found. (2) Check `issuer.is_active == True`. (3) If `schema_id` provided, check `schema_id in issuer.schemas`. (4) Return True only if all checks pass. This is called by the producer inbound pipeline (TASK-045) before any VC is accepted. Must never raise — catch all TrustLayerUnavailable internally and return False under fail_closed."
+      },
+      {
+        "step": 7,
+        "title": "Implement background refresh scheduler",
+        "detail": "Class `TrustCacheRefresher` started as asyncio background task. Maintain a `refresh_queue: asyncio.PriorityQueue` where items are `(next_refresh_at: float, cache_key)`. On successful fetch, re-queue at `next_refresh_at = now + ttl * 0.8` (refresh at 80% of TTL to avoid cold misses). Apply per-type jitter: `random.uniform(-ttl*0.1, ttl*0.1)` to avoid thundering herd across sentinel instances. Log periodic summary: `trust_cache_refresh_summary entries=N misses=M errors=E`."
+      },
+      {
+        "step": 8,
+        "title": "Expose Prometheus metrics",
+        "detail": "Using prometheus_client: `trust_cache_hits_total{type}` Counter, `trust_cache_misses_total{type}` Counter, `trust_cache_staleness_seconds{type}` Gauge (seconds since last successful refresh per type), `chain_rpc_errors_total{method}` Counter, `trust_layer_unavailable_total` Counter (OUTAGE_POLICY triggered). Update metrics on every cache access and chain call. Register on the shared Prometheus registry from TASK-052."
+      },
+      {
+        "step": 9,
+        "title": "Unit and integration tests",
+        "detail": "Unit tests: (1) cache hit returns without chain call — mock chain, assert not called; (2) cache miss triggers chain call and populates cache; (3) chain error within max_outage_age returns stale (DEGRADE policy); (4) chain error beyond max_outage_age with FAIL_CLOSED raises TrustLayerUnavailable; (5) is_issuer_trusted returns False for inactive issuer; (6) persistent cache survives restart — write, reload, assert data present. Use `pytest-asyncio` and `unittest.mock.AsyncMock` for chain client."
+      }
+    ]
+  },
+  "project_structure": {
+    "files": {
+      "libs/common/trust_layer/__init__.py": "Exports TrustLayerClient, TrustLayerUnavailable, OutagePolicy",
+      "libs/common/trust_layer/cache_models.py": "IssuerRecord, PolicyParams, StatusAnchor, ServiceBinding dataclasses",
+      "libs/common/trust_layer/memory_cache.py": "MemoryCache with LRU and TTL",
+      "libs/common/trust_layer/persistent_cache.py": "PersistentCache with encrypted disk flush",
+      "libs/common/trust_layer/client.py": "TrustLayerClient main class",
+      "libs/common/trust_layer/refresher.py": "TrustCacheRefresher background task",
+      "libs/common/trust_layer/metrics.py": "Prometheus counter/gauge definitions",
+      "tests/unit/trust_layer/test_client.py": "Unit tests for cache behavior and outage policies"
+    }
+  },
+  "configuration": {
+    "env_vars": {
+      "TRUST_CACHE_ISSUER_TTL": "60 (seconds)",
+      "TRUST_CACHE_POLICY_TTL": "60 (seconds)",
+      "TRUST_CACHE_STATUS_ANCHOR_TTL": "30 (seconds)",
+      "TRUST_CACHE_MAX_OUTAGE_AGE": "300 (seconds — max age before OUTAGE_POLICY fires)",
+      "TRUST_OUTAGE_POLICY": "fail_closed | degrade_read_only | use_cache"
+    }
+  },
+  "error_handling": [
+    {"code": "TrustLayerUnavailable", "trigger": "chain unreachable + cache stale beyond max_outage_age with FAIL_CLOSED policy", "response": "propagate as 503 in pipeline"},
+    {"code": "IssuerNotFound", "trigger": "get_issuer returns None", "response": "is_issuer_trusted returns False, pipeline rejects VC"},
+    {"code": "CacheCorrupted", "trigger": "PersistentCache decryption fails", "response": "start fresh with empty cache, WARNING log, alert metric increment"}
+  ],
+  "security_constraints": [
+    "Persistent cache file encrypted with AES-256-GCM using SecretStorage key envelope — never store plaintext trust data on disk",
+    "Cache must not serve data for DIDs that were explicitly disabled/revoked even if TTL not yet expired — on revocation event, immediately invalidate cache entry",
+    "is_issuer_trusted must be fail-safe: any exception maps to False, never to True",
+    "Metrics must not include DID values as labels to avoid cardinality explosion"
+  ],
+  "dependencies": ["TASK-020", "TASK-041", "TASK-007", "TASK-038"],
+  "acceptance_criteria": [
+    "Cache hit ratio > 90% under normal operation (no chain access per request)",
+    "Staleness metric correctly reports seconds since last chain refresh per cache type",
+    "FAIL_CLOSED raises TrustLayerUnavailable when cache is stale beyond max_outage_age",
+    "DEGRADE_READ_ONLY returns stale data with stale=True flag under same conditions",
+    "Persistent cache survives process restart and loads correctly on startup",
+    "is_issuer_trusted correctly returns False for inactive issuers and unknown DIDs"
+  ]
+}

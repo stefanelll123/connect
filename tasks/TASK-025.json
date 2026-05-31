@@ -1,0 +1,143 @@
+{
+  "id": "TASK-025",
+  "title": "Discovery Service: Enrollment Token Issuance and Approval Workflow for Sentinel Onboarding",
+  "component": "discovery-service",
+  "status": "not-started",
+  "description": "Implement the admin workflow for generating one-time enrollment tokens that authorize a new sentinel (or re-onboarding sentinel) to register with the Discovery Service. Tokens are short-lived JWTs cryptographically bound to a specific service/role/environment. The approval gate for production environments is enforced by RBAC. Only the hashed token is persisted — the raw token is shown once.",
+  "objectives": [
+    "One-time, short-expiry tokens with atomic consumption preventing any replay or double-use",
+    "Approval gate required before prod tokens become active (RBAC security-admin)",
+    "Complete audit trail for token creation, approval, consumption, and expiry"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      "Step 1 - Token Creation Endpoint: POST /api/v1/sentinels/enrollments. Requires operator role. Request body: { service_id, role, env, expires_in_seconds (default 600, max 3600), constraints: { allowed_ips?: string[], instance_metadata_hint?: string } }. Generate a 256-bit secure random jti. Build JWT payload: { jti, service_id, role, env, iss: DISCOVERY_DID, iat, exp: iat + expires_in }. Sign with Discovery issuer key from SecretStorage (Ed25519/ES256). Compute SHA-256 hash of the raw JWT (token_hash). Persist entry in enrollment_tokens table with status='PENDING' (prod) or 'APPROVED' (dev/test direct flow). Return token JWT once — never again — in the 201 response.",
+      "Step 2 - DB Persistence: enrollment_tokens table (defined in TASK-022). On insert: jti (TEXT UNIQUE), service_id, role, env, status ('PENDING'|'APPROVED'|'CONSUMED'|'EXPIRED'), token_hash (SHA-256 hex), created_by (admin sub), expires_at (from JWT exp), created_at. Fields approved_by and approved_at are NULL until approval. Index on jti. Index on (status, expires_at) for expiry sweep job.",
+      "Step 3 - Token Display (One-Time): Return 201 with { token: '<raw_jwt>', token_id: '<uuid>', expires_at, status }. Include header Warning: 'This token will not be shown again. Store it securely.' After this response, the raw token is NEVER returned again — only token_id and status are accessible via GET endpoints. The UI must show a copy-to-clipboard modal with a confirmation checkbox.",
+      "Step 4 - Approval Endpoint: POST /api/v1/sentinels/enrollments/{token_id}/approve. Requires security-admin role. Check: status must be PENDING, expires_at must be > now(). Update: status='APPROVED', approved_by=current_user.sub, approved_at=now(). Write audit event: action='approve_enrollment_token', actor=current_user, target_id=token_id, with service_id/role/env in summary. Return 200 with updated token metadata (no raw token).",
+      "Step 5 - Token Rejection/Cancellation: POST /api/v1/sentinels/enrollments/{token_id}/cancel. Requires operator role. Status must be PENDING or APPROVED (not CONSUMED/EXPIRED). Sets status='EXPIRED', cancelled_at=now(). Audit logged. This is effectively a pre-use revocation.",
+      "Step 6 - Query Endpoints: GET /api/v1/sentinels/enrollments — paginated list (cursor-based, limit max 100). Filter params: status, env, service_id. Response omits raw token. GET /api/v1/sentinels/enrollments/{token_id} — returns metadata only (no raw token).",
+      "Step 7 - Token Expiry Sweeper: Background task (runs every 60 seconds via APScheduler or Arq). Query: SELECT id FROM enrollment_tokens WHERE status IN ('PENDING','APPROVED') AND expires_at < now(). Batch update status='EXPIRED'. Log count of expired tokens. No audit event per-token (bulk expiry logged at system level).",
+      "Step 8 - Rate Limiting: POST /api/v1/sentinels/enrollments — max 20 requests per admin per minute. Enforced by Redis sliding window counter via key ratelimit:admin:{sub}:enrollment_create. Return 429 with Retry-After header on exceed.",
+      "Step 9 - Input Validation: service_id must match ^[a-z0-9][a-z0-9\\-_]{1,62}[a-z0-9]$ and must exist in services table with matching env. role must be in ['producer', 'consumer']. env must be in ['dev', 'test', 'prod']. expires_in_seconds: min 60, max 3600. Reject any extra unknown fields (strict Pydantic models with model_config = ConfigDict(extra='forbid')).",
+      "Step 10 - Environment-based Auto-Approval: If env in ['dev', 'test'] AND auto_approve_non_prod=true in settings, automatically set status='APPROVED' on creation (skip approval step). This must be disabled in prod — startup check: if env='prod' and auto_approve_non_prod=true → raise startup error."
+    ],
+    "project_structure": {
+      "files": {
+        "services/discovery/src/discovery/api/v1/routers/enrollments.py": "All enrollment token endpoints",
+        "services/discovery/src/discovery/services/enrollment_service.py": "Business logic: create, approve, cancel, sweep",
+        "services/discovery/src/discovery/repositories/enrollment_tokens.py": "DB operations including atomic consume",
+        "services/discovery/src/discovery/schemas/enrollment.py": "Pydantic request/response schemas",
+        "services/discovery/src/discovery/tasks/expiry_sweeper.py": "Background task for token expiry"
+      }
+    },
+    "domain_entities": [
+      {
+        "name": "EnrollmentToken",
+        "table": "enrollment_tokens",
+        "fields": [
+          { "name": "id", "type": "UUID", "pk": true, "default": "uuid4()" },
+          { "name": "jti", "type": "TEXT", "unique": true, "not_null": true },
+          { "name": "service_id", "type": "TEXT", "not_null": true },
+          { "name": "role", "type": "TEXT", "check": "IN ('producer','consumer')", "not_null": true },
+          { "name": "env", "type": "TEXT", "check": "IN ('dev','test','prod')", "not_null": true },
+          { "name": "status", "type": "TEXT", "check": "IN ('PENDING','APPROVED','CONSUMED','EXPIRED')", "not_null": true },
+          { "name": "token_hash", "type": "TEXT", "not_null": true, "comment": "SHA-256 hex of raw JWT — raw token never stored" },
+          { "name": "created_by", "type": "TEXT" },
+          { "name": "approved_by", "type": "TEXT", "nullable": true },
+          { "name": "created_at", "type": "TIMESTAMPTZ", "default": "now()" },
+          { "name": "approved_at", "type": "TIMESTAMPTZ", "nullable": true },
+          { "name": "expires_at", "type": "TIMESTAMPTZ", "not_null": true },
+          { "name": "consumed_at", "type": "TIMESTAMPTZ", "nullable": true },
+          { "name": "cancelled_at", "type": "TIMESTAMPTZ", "nullable": true },
+          { "name": "constraints", "type": "JSONB", "nullable": true }
+        ],
+        "indexes": [
+          "UNIQUE(jti)",
+          "INDEX(status, expires_at)",
+          "INDEX(service_id, env, status)"
+        ]
+      }
+    ],
+    "api_endpoints": [
+      {
+        "method": "POST",
+        "path": "/api/v1/sentinels/enrollments",
+        "auth": "operator",
+        "request": {
+          "service_id": "billing-api",
+          "role": "producer",
+          "env": "prod",
+          "expires_in_seconds": 600,
+          "constraints": { "allowed_ips": ["10.0.0.5"] }
+        },
+        "response_201": {
+          "token_id": "c2b8f6a0-1234-5678-abcd-000000000001",
+          "token": "<raw_jwt_shown_once>",
+          "status": "PENDING",
+          "expires_at": "2024-01-15T10:10:00Z",
+          "note": "Token will not be shown again. Copy it now."
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/sentinels/enrollments/{token_id}/approve",
+        "auth": "security-admin",
+        "request": {},
+        "response_200": {
+          "token_id": "c2b8f6a0-1234-5678-abcd-000000000001",
+          "status": "APPROVED",
+          "approved_by": "admin@example.gov",
+          "approved_at": "2024-01-15T10:02:00Z"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/sentinels/enrollments/{token_id}/cancel",
+        "auth": "operator",
+        "response_200": {
+          "token_id": "c2b8f6a0-1234-5678-abcd-000000000001",
+          "status": "EXPIRED"
+        }
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/sentinels/enrollments",
+        "auth": "viewer",
+        "query_params": { "env": "prod", "status": "PENDING", "limit": 20, "cursor": "optional" },
+        "response_200": {
+          "items": [
+            { "token_id": "...", "service_id": "billing-api", "role": "producer", "env": "prod", "status": "PENDING", "expires_at": "...", "created_by": "admin@example.gov" }
+          ],
+          "total_count": 1,
+          "next_cursor": null
+        }
+      }
+    ],
+    "error_handling": [
+      { "condition": "service_id not found or env mismatch", "status": 422, "code": "SERVICE_NOT_FOUND", "message": "Service 'billing-api' not found in env 'prod'" },
+      { "condition": "role invalid", "status": 422, "code": "INVALID_ROLE", "message": "role must be 'producer' or 'consumer'" },
+      { "condition": "token already consumed or expired when approving", "status": 409, "code": "TOKEN_NOT_APPROVABLE", "message": "Token is in status CONSUMED and cannot be approved" },
+      { "condition": "rate limit exceeded", "status": 429, "code": "RATE_LIMIT_EXCEEDED", "message": "Too many enrollment requests. Retry after 60s", "headers": {"Retry-After": "60"} },
+      { "condition": "auto-approve attempted in prod config", "status": 500, "code": "CONFIG_INVARIANT_VIOLATION", "message": "auto_approve_non_prod must not be enabled for prod environment" }
+    ],
+    "security_constraints": [
+      "Raw JWT token stored only in response body of creation call — never persisted in DB nor included in any log line",
+      "token_hash (SHA-256 hex) used for verification at onboarding time — compared against hash of submitted token",
+      "Admin endpoints (create, approve, cancel) require valid OIDC/JWT token with appropriate role (TASK-023)",
+      "All token operations write to audit_events with actor identity, action, target, and summary",
+      "Rate limiting on creation: Redis sliding window, 20 req/min per admin sub",
+      "expires_in_seconds hard-bounded at 3600 — no indefinite tokens",
+      "In prod: status starts as PENDING and requires explicit approval — enforced at service layer, not just UI layer"
+    ]
+  },
+  "dependencies": ["TASK-005", "TASK-023", "TASK-024"],
+  "acceptance_criteria": [
+    "Token creation returns raw JWT exactly once in 201 response; subsequent GET never returns it",
+    "Two concurrent attempts to consume the same token — only one succeeds (tested with concurrent test requests)",
+    "In prod env, token with status=PENDING is rejected at onboarding until status=APPROVED",
+    "Approval endpoint requires security-admin role; operator cannot approve",
+    "All token lifecycle events appear in audit_events table with actor sub and timestamp",
+    "Token expiry sweeper sets EXPIRED status correctly after exp time passes"
+  ]
+}

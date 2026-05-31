@@ -1,0 +1,2 @@
+- Implement config bundles for the sentinels, to not get anymore all the data from the .env file
+- Fix OpenTelemetry integration

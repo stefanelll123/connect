@@ -1,0 +1,63 @@
+{
+  "id": "TASK-018",
+  "title": "Smart Contract Hardening: Upgradeability, Governance Roles, and Security Review",
+  "component": "contracts",
+  "status": "not-started",
+  "description": "Harden all four registry contracts with transparent proxy upgradeability pattern (OpenZeppelin TransparentUpgradeableProxy), establish a multi-sig governance model using OpenZeppelin Governor or TimelockController for admin role management, and perform a structured security review checklist. This ensures contracts can be patched post-deployment without losing state.",
+  "objectives": [
+    "All contracts upgradeable without data loss using transparent proxy pattern",
+    "TimelockController with minimum 48-hour delay for sensitive admin operations",
+    "Documented upgrade procedure with scripted safeguards",
+    "Security review checklist completed and signed off"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      "Step 1 - Upgrade Pattern Selection: Use OpenZeppelin TransparentUpgradeableProxy. Implementation contracts (IssuerRegistryV1, etc.) inherit Initializable instead of using constructors. Storage layout must be preserved across upgrades — document in NatSpec comments.",
+      "Step 2 - Initializable Migration: Remove constructors from all registry contracts. Replace with initialize(address initialAdmin) function decorated with initializer modifier (OpenZeppelin Initializable). All state initialization moves into initialize().",
+      "Step 3 - ProxyAdmin Contract: Deploy ProxyAdmin (OZ v5). ProxyAdmin is owned by TimelockController. Never allow EOA to directly control ProxyAdmin — all upgrades must go through governance.",
+      "Step 4 - TimelockController Setup: Deploy TimelockController with minimumDelay=48 hours (172800 seconds) for mainnet, 300 seconds for testnet. proposers: [governance multisig address]. executors: [address(0)] (anyone can execute after delay). admin: address(0) after setup (no direct admin).",
+      "Step 5 - Upgrade Script (scripts/upgrade/upgrade-v2.ts): Uses hardhat-upgrades plugin (@openzeppelin/hardhat-upgrades). Steps: (1) deploy new implementation, (2) prepare upgrade calldata, (3) propose to TimelockController with required delay, (4) execute after delay. Store upgrade history in deployments/{network}/upgrades.json.",
+      "Step 6 - Storage Layout Documentation: In each contract, add @custom:storage-layout NatSpec block listing all storage slot assignments. When adding a new variable in V2+, always append — never reorder or remove. Use __gap[50] as reserved storage slots at end of each contract.",
+      "Step 7 - Reentrancy Guard: All state-mutating external functions in registry contracts that do external calls (cross-contract to IssuerRegistry) must use ReentrancyGuard (nonReentrant modifier).",
+      "Step 8 - Security Checklist: (1) Integer overflow: all contracts use ^0.8.25 (built-in overflow protection). (2) Access control: all mutating functions have onlyRole. (3) Reentrancy: covered by ReentrancyGuard. (4) Denial of service: array iteration capped at 1000. (5) Uninitialized proxy: initializer modifier prevents double init. (6) Front-running: not applicable (registry operations are admin-only). (7) Event monitoring: all state changes emit events. (8) Emergency pause: all registries pausable.",
+      "Step 9 - Deployment Procedure Documentation: Create docs/contracts/upgrade-procedure.md. Section 1: Pre-upgrade (run npx hardhat-upgrades validate to check storage layout compatibility). Section 2: Deploy new implementation. Section 3: Propose upgrade to Timelock. Section 4: Wait for delay. Section 5: Execute upgrade. Section 6: Smoke test on-chain.",
+      "Step 10 - Contract Size Check: All contracts must be < 24KB (EIP-170 limit). Run npx hardhat size-contracts after each modification. If approaching limit, extract library functions to external libraries."
+    ],
+    "project_structure": {
+      "files": {
+        "contracts/contracts/governance/TimelockControllerSetup.sol": "Gov setup helper",
+        "contracts/scripts/deploy/deploy-proxies.ts": "Deploy with transparent proxies",
+        "contracts/scripts/upgrade/upgrade-v2.ts": "Template upgrade script",
+        "docs/contracts/upgrade-procedure.md": "Upgrade runbook",
+        "contracts/deployments/{network}/upgrades.json": "Upgrade history"
+      }
+    },
+    "security_constraints": [
+      "initializer modifier MUST be present on all initialize() functions — double initialization is a critical bug",
+      "__gap[50] reserved storage slots MUST be present in all upgradeable contracts",
+      "ProxyAdmin MUST be owned by TimelockController — direct EOA ownership is prohibited",
+      "minimumDelay MUST be >= 172800 seconds (48h) on mainnet chains",
+      "Storage layout compatibility MUST be validated before every upgrade via hardhat-upgrades validate",
+      "Upgrade proposals MUST be submitted with human-readable description in Timelock calldata"
+    ]
+  },
+  "technical_requirements": [
+    "@openzeppelin/contracts-upgradeable 5.x",
+    "@openzeppelin/hardhat-upgrades 3.x",
+    "Solidity 0.8.25"
+  ],
+  "dependencies": [
+    "TASK-014",
+    "TASK-015",
+    "TASK-016",
+    "TASK-017"
+  ],
+  "acceptance_criteria": [
+    "All four contracts deploy as transparent proxies without errors",
+    "npx hardhat-upgrades validate passes for all contracts",
+    "Double-calling initialize() reverts with InvalidInitialization error",
+    "Upgrade via TimelockController succeeds after delay",
+    "Direct call to ProxyAdmin without going through Timelock reverts",
+    "Contract sizes are all < 24KB"
+  ]
+}

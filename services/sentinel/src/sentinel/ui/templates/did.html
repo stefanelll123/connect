@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>DID Identity</h1>
+<div class="card">
+  <dl>
+    <dt>DID</dt>
+    <dd id="did-value">{{ did }}<button class="copy-btn" onclick="navigator.clipboard.writeText('{{ did }}')">Copy</button></dd>
+    <dt>Key Fingerprint</dt>
+    <dd>{{ key_fingerprint }}</dd>
+    <dt>Service ID</dt>
+    <dd>{{ service_id }}</dd>
+    <dt>Environment</dt>
+    <dd>{{ env }}</dd>
+    <dt>Role</dt>
+    <dd>{{ role }}</dd>
+    <dt>Instance ID</dt>
+    <dd>{{ instance_id }}</dd>
+    <dt>Uptime</dt>
+    <dd>{{ uptime }}</dd>
+  </dl>
+</div>
+<p style="color:#a8b2d8;font-size:0.85rem;margin-top:1rem;">
+  This DID is your sentinel identity. Share it with Discovery administrators for enrollment.
+</p>
+{% endblock %}

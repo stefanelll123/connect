@@ -1,0 +1,151 @@
+{
+  "id": "TASK-010",
+  "title": "Reproducible Local Environment: Docker Compose for Discovery, Sentinel, Database, Cache, and Blockchain Devnet",
+  "component": "infrastructure",
+  "status": "not-started",
+  "description": "Create a fully functional local development environment using Docker Compose. All platform components must start with a single 'docker compose up' command. This includes PostgreSQL, Redis, Discovery Service, Sentinel (Producer + Consumer), a local blockchain node (Hardhat or Anvil), and an OpenTelemetry Collector. A seed script deploys smart contracts to the local chain and populates the database for development.",
+  "objectives": [
+    "Complete local environment with one command",
+    "Reproducible: running 'make reset' destroys all state and restarts cleanly",
+    "Environment variables clearly separated from secrets — use .env.local for dev secrets only",
+    "All service health-checks configured — compose waits for dependencies before starting dependent services"
+  ],
+  "implementation_guidance": {
+    "overview": "Use Docker Compose v2 (compose.yaml, not docker-compose.yaml for newer versions). Define a shared network 'sentinel_net'. Each service has a healthcheck. Use depends_on: condition: service_healthy. Use named volumes for persistence. Provide a seed.py script that deploys contracts to the local Hardhat/Anvil node and inserts bootstrap data into PostgreSQL.",
+    "steps": [
+      "Step 1 - PostgreSQL Service: image postgres:15-alpine. Environment: POSTGRES_USER=sentinel_user, POSTGRES_PASSWORD=sentinel_pass, POSTGRES_DB=sentinel_db. Healthcheck: pg_isready -U sentinel_user -d sentinel_db. Volume: postgres_data:/var/lib/postgresql/data. Port: 5432:5432.",
+      "Step 2 - Redis Service: image redis:7-alpine with --requirepass flag (password: redis_secret_dev). Healthcheck: redis-cli -a redis_secret_dev ping. Port: 6379:6379. Volume: redis_data:/data. Enable AOF persistence: redis-server --appendonly yes --requirepass redis_secret_dev.",
+      "Step 3 - Local Blockchain Node: Use hardhat node from the /contracts directory OR use ghcr.io/foundry-rs/foundry:latest (Anvil). Preferred: ghcr.io/foundry-rs/foundry with command: anvil --host 0.0.0.0 --port 8545 --chain-id 31337 --block-time 1. Healthcheck: curl -sf http://localhost:8545 with JSON-RPC eth_chainId call. Port: 8545:8545.",
+      "Step 4 - OTel Collector: Use otel/opentelemetry-collector-contrib:0.100.0. Mount config: ./deploy/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml. Listens on 4317 (gRPC OTLP) and 4318 (HTTP OTLP). Exports to Prometheus on port 8889. Writes logs to stdout.",
+      "Step 5 - Discovery Service: Build from ./services/discovery/Dockerfile. Environment: from .env.local plus: DATABASE_URL=postgresql+asyncpg://sentinel_user:sentinel_pass@postgres:5432/sentinel_db, REDIS_URL=redis://:redis_secret_dev@redis:6379/0, BLOCKCHAIN_RPC_URL=http://hardhat:8545, OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318, OTEL_SERVICE_NAME=discovery-service. depends_on: postgres (service_healthy), redis (service_healthy). Healthcheck: curl -f http://localhost:8000/health. Port: 8000:8000.",
+      "Step 6 - Sentinel Producer: Build from ./services/sentinel/Dockerfile. Environment: SENTINEL_ROLE=producer, SERVICE_ID=dev-sentinel-alpha, SENTINEL_ENV=dev, DATABASE_URL (same as discovery), REDIS_URL, BLOCKCHAIN_RPC_URL (hardhat), OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_SERVICE_NAME=sentinel-producer, SECRET_STORAGE_BACKEND=local_file, SECRET_STORAGE_KEY_FILE=/data/sentinel.key.enc. Mount volume: sentinel_producer_data:/data. depends_on: discovery (service_healthy), hardhat (service_healthy). Port: 8100:8000.",
+      "Step 7 - Sentinel Consumer: Same as producer but SENTINEL_ROLE=consumer, OTEL_SERVICE_NAME=sentinel-consumer, volume sentinel_consumer_data:/data. Port: 8101:8000.",
+      "Step 8 - Seed Script (scripts/seed.py): Run after all services are healthy. Phase 1 (Chain): Connect to http://localhost:8545 via web3.py. Deploy IssuerRegistry, TrustPolicyRegistry, StatusRegistry, ServiceRegistry contracts using the first Hardhat/Anvil pre-funded account. Save deployed addresses to contracts/deployments/local.json. Phase 2 (DB): Connect to PostgreSQL via psycopg2 or asyncpg. Insert a bootstrap issuer record, a test service record, and sample VC data for development. Phase 3 (Sentinel): Generate a test enrollment token via the Discovery Service API and trigger onboarding of the dev sentinel instances.",
+      "Step 9 - Reset Script (scripts/reset.sh): docker compose down -v (removes all volumes). docker compose up -d. Wait for healthy state. python scripts/seed.py. This must complete within 120 seconds.",
+      "Step 10 - OTel Collector Configuration (deploy/otel-collector-config.yaml): receivers: otlp (grpc:4317, http:4318). processors: batch. exporters: prometheus (endpoint 0.0.0.0:8889), debug (verbosity: normal). service.pipelines: traces (otlp → batch → debug), metrics (otlp → batch → prometheus), logs (otlp → batch → debug).",
+      "Step 11 - .env.local.example: Create this file (committed) with all required environment variable names and placeholder values. Real .env.local (ignored by git) is created by developer. Required vars: POSTGRES_PASSWORD, REDIS_PASSWORD, HARDHAT_PRIVATE_KEY (first Hardhat account), SECRET_STORAGE_MASTER_KEY (AES-256 hex).",
+      "Step 12 - Healthcheck Design: All services must expose /health endpoint returning HTTP 200 with JSON body {\"status\": \"ok\", \"service\": \"<name>\", \"version\": \"<semver>\"}. Docker healthcheck uses interval: 10s, timeout: 5s, retries: 5, start_period: 30s."
+    ],
+    "project_structure": {
+      "files": {
+        "docker-compose.yaml": "All service definitions",
+        "docker-compose.override.yaml": "Local developer overrides (git-ignored)",
+        ".env.local.example": "Template for .env.local (committed)",
+        ".env.local": "Actual dev secrets (git-ignored)",
+        "scripts/": {
+          "seed.py": "Deploy contracts + insert bootstrap DB data",
+          "reset.sh": "Full environment teardown + restart"
+        },
+        "deploy/": {
+          "otel-collector-config.yaml": "OpenTelemetry Collector configuration"
+        }
+      }
+    },
+    "docker_compose_services": {
+      "postgres": {
+        "image": "postgres:15-alpine",
+        "environment": {
+          "POSTGRES_USER": "sentinel_user",
+          "POSTGRES_PASSWORD": "${POSTGRES_PASSWORD}",
+          "POSTGRES_DB": "sentinel_db"
+        },
+        "volumes": ["postgres_data:/var/lib/postgresql/data"],
+        "ports": ["5432:5432"],
+        "healthcheck": "pg_isready -U sentinel_user -d sentinel_db"
+      },
+      "redis": {
+        "image": "redis:7-alpine",
+        "command": "redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}",
+        "volumes": ["redis_data:/data"],
+        "ports": ["6379:6379"],
+        "healthcheck": "redis-cli -a ${REDIS_PASSWORD} ping"
+      },
+      "hardhat": {
+        "image": "ghcr.io/foundry-rs/foundry:latest",
+        "command": "anvil --host 0.0.0.0 --port 8545 --chain-id 31337 --block-time 1",
+        "ports": ["8545:8545"]
+      },
+      "otel-collector": {
+        "image": "otel/opentelemetry-collector-contrib:0.100.0",
+        "volumes": ["./deploy/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml"],
+        "ports": ["4317:4317", "4318:4318", "8889:8889"]
+      },
+      "discovery": {
+        "build": "./services/discovery",
+        "depends_on": ["postgres (healthy)", "redis (healthy)"],
+        "ports": ["8000:8000"]
+      },
+      "sentinel-producer": {
+        "build": "./services/sentinel",
+        "environment": {"SENTINEL_ROLE": "producer"},
+        "depends_on": ["discovery (healthy)"],
+        "ports": ["8100:8000"]
+      },
+      "sentinel-consumer": {
+        "build": "./services/sentinel",
+        "environment": {"SENTINEL_ROLE": "consumer"},
+        "depends_on": ["discovery (healthy)"],
+        "ports": ["8101:8000"]
+      }
+    },
+    "data_structures": {
+      "seed_output_local_json": {
+        "description": "contracts/deployments/local.json written by seed.py after contract deployment",
+        "example": {
+          "network": "local",
+          "chainId": 31337,
+          "deployedAt": "2024-01-15T10:00:00Z",
+          "contracts": {
+            "IssuerRegistry": {
+              "address": "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9",
+              "deployedBlock": 1
+            },
+            "TrustPolicyRegistry": {
+              "address": "0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9",
+              "deployedBlock": 1
+            },
+            "StatusRegistry": {
+              "address": "0x5FC8d32690cc91D4c39d9d3abcBD16989F875707",
+              "deployedBlock": 1
+            },
+            "ServiceRegistry": {
+              "address": "0x0165878A594ca255338adfa4d48449f69242Eb8F",
+              "deployedBlock": 1
+            }
+          }
+        }
+      },
+      "health_response": {
+        "status": "ok",
+        "service": "discovery",
+        "version": "0.1.0"
+      }
+    },
+    "security_constraints": [
+      ".env.local MUST be in .gitignore — never commit real credentials",
+      "All containers run as non-root user (uid 1000) — Dockerfiles must include USER 1000",
+      "PostgreSQL password must be at least 16 characters in local dev — enforced by seed script validation",
+      "Hardhat/Anvil local node is only exposed on localhost — never bind to 0.0.0.0 in CI without firewall",
+      "No default TLS in local compose — TLS tested only in staging/prod environments",
+      "Sentinel key encryption key (SECRET_STORAGE_MASTER_KEY) must be a 32-byte hex string — seed script generates and stores in .env.local if not present"
+    ]
+  },
+  "technical_requirements": [
+    "Docker Compose v2 (docker compose, not docker-compose)",
+    "All services must start and be healthy within 90 seconds on first run (excluding image pull time)",
+    "make reset completes within 120 seconds (after images are built)",
+    "Tested on Linux and macOS; Windows via WSL2"
+  ],
+  "dependencies": [
+    "TASK-009"
+  ],
+  "acceptance_criteria": [
+    "docker compose up -d starts all services",
+    "docker compose ps shows all services as healthy within 90 seconds",
+    "python scripts/seed.py completes without errors after docker compose up",
+    "make reset destroys all volumes and restores a clean functional state",
+    "curl http://localhost:8000/health returns HTTP 200",
+    "curl http://localhost:8545 with eth_chainId JSON-RPC call returns chainId 31337",
+    "No default passwords or secrets are committed to the repository"
+  ]
+}

@@ -1,0 +1,64 @@
+// Grafana Alloy configuration — River syntax
+// Collects logs from Docker containers and forwards to Loki.
+//
+// NOTE: Promtail reached End-of-Life on March 2, 2026. Use Alloy instead.
+// Reference: https://grafana.com/docs/alloy/latest/
+
+// ---------------------------------------------------------------------------
+// 1. Discover running Docker containers
+// ---------------------------------------------------------------------------
+discovery.docker "containers" {
+  host             = "unix:///var/run/docker.sock"
+  refresh_interval = "10s"
+}
+
+// ---------------------------------------------------------------------------
+// 2. Relabel discovered targets
+//    Keep only containers with a "logging" label; set Loki stream labels.
+// ---------------------------------------------------------------------------
+discovery.relabel "docker_labels" {
+  targets = discovery.docker.containers.targets
+
+  // Use the container name as the "container" stream label
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+
+  // Use the Docker Compose service name as "service"
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service"
+  }
+
+  // Add a static "job" label
+  rule {
+    replacement  = "docker"
+    target_label = "job"
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 3. Tail container logs
+// ---------------------------------------------------------------------------
+loki.source.docker "containers" {
+  host    = "unix:///var/run/docker.sock"
+  targets = discovery.relabel.docker_labels.output
+
+  forward_to = [loki.write.local.receiver]
+}
+
+// ---------------------------------------------------------------------------
+// 4. Write to Loki
+// ---------------------------------------------------------------------------
+loki.write "local" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+
+  external_labels = {
+    "environment" = "local",
+    "stack"       = "sentinel",
+  }
+}

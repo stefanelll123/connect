@@ -1,0 +1,154 @@
+{
+  "id": "TASK-028",
+  "title": "Discovery Service: Verifiable Credential Issuance Module (JWT-VC/JWT-VP per VC DM 2.0 and VC-JOSE-COSE)",
+  "component": "discovery-service",
+  "status": "not-started",
+  "description": "Implement the credential issuance module in the Discovery Service covering the three core VC types defined in TASK-004: SentinelIdentityCredential, ServiceBindingCredential, and AccessGrantCredential. All credentials are issued as JWT-VCs (VC-JOSE-COSE profile), signed with the Discovery issuer key, include Bitstring Status List references for revocation, and are verified internally before distribution. Only credential metadata is persisted — raw credential ciphertext is optionally stored encrypted.",
+  "objectives": [
+    "Deterministic, schema-validated issuance for all three VC types",
+    "Issuer key managed by SecretStorage with kid rotation support",
+    "Internal self-check (sign → verify) before any credential is delivered"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      "Step 1 - CredentialIssuerService Class: Create services/discovery/src/discovery/services/credential_issuer.py. Class CredentialIssuerService with methods: issue_sentinel_identity(sentinel: SentinelRecord, session) -> str (JWT), issue_service_binding(sentinel: SentinelRecord, service: ServiceRecord, session) -> str, issue_access_grant(consumer_did: str, producer_service_id: str, env: str, scope: list[str], expires_in: int, session) -> str, reissue_on_rotation(credential_id: UUID, session) -> str. All methods return the signed JWT-VC string.",
+      "Step 2 - JWT-VC Structure (VC DM 2.0 + VC-JOSE-COSE): JOSE header: { alg: 'EdDSA', kid: '<key_id>', typ: 'vc+jwt' }. JWT payload claims: iss (Discovery DID), sub (subject DID), nbf (not before as Unix timestamp), exp (expiry as Unix timestamp), jti (UUID v4 — credential ID), iat, vc (Verifiable Credential object). The vc object: { '@context': ['https://www.w3.org/ns/credentials/v2'], type: ['VerifiableCredential', '<specific_type>'], issuer: { id: DISCOVERY_DID }, validFrom: ISO-8601, validUntil: ISO-8601, credentialSubject: { id: subject_DID, ...type-specific_claims }, credentialStatus: { id: '<status_list_url>#<index>', type: 'BitstringStatusListEntry', statusPurpose: 'revocation', statusListIndex: int, statusListCredential: '<status_list_url>' } }.",
+      "Step 3 - SentinelIdentityCredential Claims: credentialSubject: { id: sentinel_did, role: 'producer'|'consumer', service_id: str, env: 'dev'|'test'|'prod', entity_id: str (gov entity owning the sentinel), registered_at: ISO-8601 }. exp: max 90 days from issuance. jti: unique per credential.",
+      "Step 4 - ServiceBindingCredential Claims: credentialSubject: { id: sentinel_did, authorized_service_id: str, authorized_service_did: str, env: str, binding_type: 'producer-proxy' }. aud: service DID. exp: max 1 year. Issued when a sentinel completes onboarding and is verified as the legitimate proxy for a service.",
+      "Step 5 - AccessGrantCredential Claims: credentialSubject: { id: consumer_sentinel_did, target_service_id: str, target_service_did: str, env: str, scope: list[str] (e.g. ['read:invoices', 'submit:tax-return']), granted_by: admin_sub, granted_at: ISO-8601 }. aud: producer service DID. exp: configurable (default 30 days, max 365 days). scope items must be registered in TrustPolicyRegistry (TASK-015) for the service.",
+      "Step 6 - Status List Integration: Before issuing each VC: call StatusListService.allocate_index(issuer_did, env, credential_type) → returns { status_list_id, index }. Store this reference in the credential's credentialStatus object. Also persist in credentials table: status_list_id, status_list_index.",
+      "Step 7 - Signing: Load issuer private key from SecretStorage using SecretStorage.get_key(role='vc_issuer', env=env). Use python-jose or PyJWT to sign. Validate algorithm matches supported list from TASK-003 settings. Raise IssuerKeyUnavailableError if key cannot be loaded.",
+      "Step 8 - Internal Self-Check: After signing, run: (a) parse JWT, (b) verify signature using corresponding public key from SecretStorage, (c) validate schema using Pydantic model, (d) check iss/sub/exp/jti present, (e) check credentialStatus reference is well-formed. If any check fails → raise CredentialIssuanceError (do not return partial credential).",
+      "Step 9 - DB Persistence: Insert into credentials table (TASK-022): credential_type, issuer_did, subject_did, audience (if set), env, jti, issued_at, expires_at, status='active', status_list_id, status_list_index, is_latest=true. Do NOT store raw JWT text in DB unless encryption is available. If CREDENTIAL_STORAGE_ENCRYPT=true: encrypt JWT with AES-256-GCM using a key from SecretStorage, store ciphertext in encrypted_payload column.",
+      "Step 10 - IssuerRegistry Verification: If VERIFY_ISSUER_ON_CHAIN=true: call IssuerRegistryClient.is_issuer_active(DISCOVERY_DID) before issuing. If issuer is not active on-chain → raise IssuerNotActiveError with detail. This prevents issuance if the Discovery node itself has been disabled in the trust registry.",
+      "Step 11 - Max TTL Enforcement: Enforce maximum TTL per credential type in settings: SentinelIdentityCredential: max 90 days, ServiceBindingCredential: max 365 days, AccessGrantCredential: max 365 days (configurable). If requested exp exceeds max TTL → clamp to max and log warning.",
+      "Step 12 - Reissuance on Rotation: reissue_on_rotation(credential_id) fetches the existing credential metadata, generates a new VC with same claims but new jti + new exp + updated status reference + new signature. Marks old credential is_latest=false. Optionally revokes old credential status bit. Used when the issuer key rotates or when a sentinel requests credential renewal (TASK-029)."
+    ],
+    "project_structure": {
+      "files": {
+        "services/discovery/src/discovery/services/credential_issuer.py": "CredentialIssuerService with all issue_* methods",
+        "services/discovery/src/discovery/schemas/credentials.py": "Pydantic models for VC payload validation",
+        "services/discovery/src/discovery/api/v1/routers/credentials.py": "Admin endpoints: issue, list, reissue",
+        "services/discovery/src/discovery/repositories/credentials.py": "DB operations for credentials table"
+      }
+    },
+    "domain_entities": [
+      {
+        "name": "CredentialRecord",
+        "table": "credentials",
+        "fields": [
+          { "name": "id", "type": "UUID", "pk": true },
+          { "name": "credential_type", "type": "TEXT", "not_null": true, "enum": ["SentinelIdentityCredential", "ServiceBindingCredential", "AccessGrantCredential"] },
+          { "name": "issuer_did", "type": "TEXT", "not_null": true },
+          { "name": "subject_did", "type": "TEXT", "not_null": true },
+          { "name": "audience", "type": "TEXT", "nullable": true },
+          { "name": "env", "type": "TEXT", "not_null": true },
+          { "name": "jti", "type": "TEXT", "unique": true, "not_null": true },
+          { "name": "issued_at", "type": "TIMESTAMPTZ", "not_null": true },
+          { "name": "expires_at", "type": "TIMESTAMPTZ", "not_null": true },
+          { "name": "status", "type": "TEXT", "not_null": true, "enum": ["active", "revoked", "expired", "deprecated"] },
+          { "name": "status_list_id", "type": "TEXT" },
+          { "name": "status_list_index", "type": "INT" },
+          { "name": "is_latest", "type": "BOOL", "default": true },
+          { "name": "encrypted_payload", "type": "BYTEA", "nullable": true, "comment": "AES-256-GCM encrypted JWT" }
+        ],
+        "indexes": [
+          "UNIQUE(jti)",
+          "INDEX(subject_did, env, is_latest)",
+          "INDEX(status_list_id, status_list_index)"
+        ]
+      }
+    ],
+    "api_endpoints": [
+      {
+        "method": "POST",
+        "path": "/api/v1/credentials/sentinel-identity",
+        "auth": "security-admin",
+        "description": "Issue a SentinelIdentityCredential for a registered sentinel",
+        "request": { "sentinel_id": "a1b2c3d4-..." },
+        "response_201": {
+          "credential_id": "credential record UUID",
+          "jti": "urn:uuid:...",
+          "credential_type": "SentinelIdentityCredential",
+          "subject_did": "did:key:z6Mk...",
+          "expires_at": "2024-04-15T10:00:00Z",
+          "status": "active",
+          "jwt_vc": "eyJhbGci..."
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/credentials/access-grant",
+        "auth": "security-admin",
+        "request": {
+          "consumer_sentinel_id": "...",
+          "producer_service_id": "billing-api",
+          "env": "prod",
+          "scope": ["read:invoices"],
+          "expires_in_days": 30
+        },
+        "response_201": {
+          "credential_id": "...",
+          "jti": "urn:uuid:...",
+          "credential_type": "AccessGrantCredential",
+          "subject_did": "did:key:z6Consumer...",
+          "expires_at": "2024-02-15T10:00:00Z",
+          "jwt_vc": "eyJhbGci..."
+        }
+      }
+    ],
+    "example_jwt_vc_payload": {
+      "iss": "did:key:z6DiscoveryIssuer",
+      "sub": "did:key:z6MkSentinel",
+      "nbf": 1705312800,
+      "exp": 1713088800,
+      "jti": "urn:uuid:a1b2c3d4-0000-0000-0000-000000000001",
+      "vc": {
+        "@context": ["https://www.w3.org/ns/credentials/v2"],
+        "type": ["VerifiableCredential", "SentinelIdentityCredential"],
+        "issuer": { "id": "did:key:z6DiscoveryIssuer" },
+        "validFrom": "2024-01-15T10:00:00Z",
+        "validUntil": "2024-04-15T10:00:00Z",
+        "credentialSubject": {
+          "id": "did:key:z6MkSentinel",
+          "role": "producer",
+          "service_id": "billing-api",
+          "env": "prod",
+          "entity_id": "gov-entity-A"
+        },
+        "credentialStatus": {
+          "id": "https://discovery.example.gov/status/status-list-001#42",
+          "type": "BitstringStatusListEntry",
+          "statusPurpose": "revocation",
+          "statusListIndex": 42,
+          "statusListCredential": "https://discovery.example.gov/status/status-list-001"
+        }
+      }
+    },
+    "error_handling": [
+      { "condition": "Issuer key unavailable", "status": 503, "code": "ISSUER_KEY_UNAVAILABLE", "message": "Credential signing key temporarily unavailable" },
+      { "condition": "Issuer not active on-chain", "status": 403, "code": "ISSUER_NOT_ACTIVE", "message": "Discovery issuer is not registered as active in IssuerRegistry contract" },
+      { "condition": "Status list index allocation failure", "status": 503, "code": "STATUS_LIST_ALLOCATION_FAILED", "message": "Could not allocate a status list index for this credential" },
+      { "condition": "Internal self-check fails after signing", "status": 500, "code": "CREDENTIAL_INTEGRITY_FAILURE", "message": "Issued credential failed internal verification — not delivered" },
+      { "condition": "Scope item not registered for service", "status": 422, "code": "INVALID_SCOPE", "message": "Scope 'delete:all' is not registered for service 'billing-api'" },
+      { "condition": "expires_in_days exceeds max TTL", "status": 422, "code": "TTL_EXCEEDS_MAXIMUM", "message": "Maximum TTL for AccessGrantCredential is 365 days" }
+    ],
+    "security_constraints": [
+      "Raw JWT-VC only returned once in the issuance API response — not re-retrievable. Store encrypted in DB if CREDENTIAL_STORAGE_ENCRYPT=true.",
+      "issuer private key never exposed outside SecretStorage — only the signing result is used",
+      "kid in JOSE header must match a key registered in IssuerRegistry on-chain",
+      "Internal self-check is mandatory — no credential leaves the service without passing signature + schema verification",
+      "All credential issuance operations write to audit_events: actor, credential_type, subject_did, jti",
+      "Scope for AccessGrantCredential validated against an allowlist per service — no freeform scope strings in prod"
+    ]
+  },
+  "dependencies": ["TASK-004", "TASK-022", "TASK-014", "TASK-015", "TASK-011"],
+  "acceptance_criteria": [
+    "Discovery issues all three VC types and returned JWT-VCs pass internal schema validation",
+    "Signature verification with Discovery public key succeeds for all issued credentials",
+    "credentialStatus reference is present and valid in all issued VCs",
+    "Issuer key rotation produces credentials with new kid; old credentials with old kid still verifiable",
+    "Internal self-check catches and rejects a deliberately corrupted credential payload (unit test)",
+    "Credential metadata is persisted in credentials table with correct jti, status, and status_list_index"
+  ]
+}

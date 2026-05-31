@@ -1,0 +1,91 @@
+{
+  "id": "TASK-013",
+  "title": "Hardhat Workspace Setup for Solidity Smart Contracts",
+  "component": "contracts",
+  "status": "not-started",
+  "description": "Initialize and fully configure the Hardhat development environment in /contracts. Configure compiler, network settings (local devnet + Sepolia testnet), deployment tooling, ABI artifact export for Python/TypeScript consumers, and integrated test framework. This task produces no contract logic — it only establishes the developer toolchain.",
+  "objectives": [
+    "Single workspace for all sentinel platform smart contracts",
+    "Reproducible compilation with fixed Solidity compiler version",
+    "Sepolia testnet deploy capability via environment-injected private key",
+    "Exported ABI + address JSON artifacts consumed by Python web3.py client"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      "Step 1 - Initialize Package: cd /contracts && npm init -y. Install: npm install --save-dev hardhat@2.22.x @nomicfoundation/hardhat-toolbox@5.x @openzeppelin/contracts@5.x ts-node typescript@5.x dotenv. Init Hardhat with TypeScript: npx hardhat init → select 'Create a TypeScript project'.",
+      "Step 2 - hardhat.config.ts: Import HardhatUserConfig from hardhat/config. Solidity: version '0.8.25', optimizer enabled (200 runs). Networks: hardhat (default, chainId 31337), localhost (url: http://127.0.0.1:8545, chainId 31337), sepolia (url: process.env.SEPOLIA_RPC_URL, accounts: [process.env.DEPLOYER_PRIVATE_KEY], chainId 11155111). gasReporter: enabled: true. paths: artifacts ./artifacts, cache ./cache, deployments: NOT here — use separate deploy script.",
+      "Step 3 - tsconfig.json: target ES2020, module commonjs, strict true, esModuleInterop true, include contracts/** test/** scripts/**.",
+      "Step 4 - Solidity Directory Structure: contracts/ → Registries/ (IssuerRegistry.sol, TrustPolicyRegistry.sol, StatusRegistry.sol, ServiceRegistry.sol), interfaces/ (IIssuerRegistry.sol, etc.), libraries/ (DIDUtils.sol, BytesUtils.sol), errors/ (SentinelErrors.sol — custom error definitions). All contracts start with same pragma and license header.",
+      "Step 5 - Standard Contract Header: // SPDX-License-Identifier: MIT. pragma solidity ^0.8.25;. All contracts import from @openzeppelin/contracts/.",
+      "Step 6 - Deployment Scripts (scripts/deploy/): deploy-local.ts — deploys all 4 registry contracts to localhost, saves addresses to contracts/deployments/local.json. deploy-sepolia.ts — deploys to Sepolia, saves to contracts/deployments/sepolia.json. Deployment JSON format: {network, chainId, deployedAt, deployer, contracts: {Name: {address, deployedBlock, txHash}}}.",
+      "Step 7 - ABI Export (scripts/export-abis.ts): After compilation, copy ABI JSON from artifacts/contracts/**/*.json to contracts/abis/{ContractName}.abi.json. These are committed and consumed by Python web3.py client (TASK-020). Python client never reads from artifacts/ directly.",
+      "Step 8 - Makefile targets: compile (npx hardhat compile), test (npx hardhat test --network hardhat), deploy-local (npx hardhat run scripts/deploy/deploy-local.ts --network localhost), deploy-sepolia (npx hardhat run scripts/deploy/deploy-sepolia.ts --network sepolia), export-abis (ts-node scripts/export-abis.ts), lint-sol (npx solhint 'contracts/**/*.sol').",
+      "Step 9 - Solhint Configuration (.solhint.json): extends: solhint:default. Rules: avoid-call-value, no-complex-fallback, no-inline-assembly (warn), reason-string (warn for all require). This enforces basic Solidity security best practices.",
+      "Step 10 - .env.example: SEPOLIA_RPC_URL=https://sepolia.infura.io/v3/YOUR_KEY, DEPLOYER_PRIVATE_KEY=0xYOUR_PRIVATE_KEY (testnet only). ETHERSCAN_API_KEY=optional. .env is git-ignored. Actual .env used in CI via GitHub secrets."
+    ],
+    "project_structure": {
+      "files": {
+        "contracts/": {
+          "contracts/": {
+            "Registries/": "Registry contract .sol files",
+            "interfaces/": "Interface .sol files",
+            "libraries/": "Shared Solidity libraries",
+            "errors/": "SentinelErrors.sol"
+          },
+          "scripts/": {
+            "deploy/": "deploy-local.ts, deploy-sepolia.ts",
+            "export-abis.ts": "Copy ABIs to abis/"
+          },
+          "abis/": "Exported ABI JSON files (committed)",
+          "deployments/": "Address artifacts (committed, no keys)",
+          "test/": "Hardhat test files",
+          "hardhat.config.ts": "",
+          "package.json": "",
+          "tsconfig.json": "",
+          ".solhint.json": "",
+          ".env.example": ""
+        }
+      }
+    },
+    "data_structures": {
+      "deployment_json_example": {
+        "network": "local",
+        "chainId": 31337,
+        "deployedAt": "2024-01-15T10:00:00Z",
+        "deployer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "contracts": {
+          "IssuerRegistry": {
+            "address": "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9",
+            "deployedBlock": 1,
+            "txHash": "0xabc123..."
+          }
+        }
+      }
+    },
+    "security_constraints": [
+      "DEPLOYER_PRIVATE_KEY MUST only be a testnet key — NEVER a mainnet key in any config file",
+      "deployments/*.json files MUST NOT contain private keys — only addresses and block numbers",
+      "Optimizer runs value (200) is appropriate — do not reduce below 200 as it may affect security analysis",
+      "Solhint no-inline-assembly rule: inline assembly is PROHIBITED unless explicitly justified with a comment",
+      "OpenZeppelin v5.x must be used — do not downgrade to v4 as v4 had known access control vulnerabilities"
+    ]
+  },
+  "technical_requirements": [
+    "Node.js 20+ (LTS)",
+    "Hardhat 2.22.x",
+    "@openzeppelin/contracts 5.x",
+    "Solidity 0.8.25",
+    "TypeScript 5.x"
+  ],
+  "dependencies": [
+    "TASK-009"
+  ],
+  "acceptance_criteria": [
+    "npx hardhat compile completes with no errors or warnings",
+    "npx hardhat test runs against hardhat network and all sample tests pass",
+    "contracts/abis/ contains ABI JSON after make export-abis",
+    "deploy-local.ts creates contracts/deployments/local.json successfully",
+    "Solhint reports no errors on contracts/**/*.sol",
+    "No private keys or mnemonics in any committed file"
+  ]
+}

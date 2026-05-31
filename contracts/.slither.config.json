@@ -1,0 +1,22 @@
+{
+  "filter_paths": ["@openzeppelin", "node_modules"],
+  "exclude_informational": true,
+  "exclude_low": false,
+  "detectors_to_exclude": [],
+  "json": "slither-output.json",
+  "false_positives": [
+    {
+      "detector": "divide-before-multiply",
+      "justification": "No division present in registry contracts"
+    },
+    {
+      "detector": "tautology",
+      "justification": "Tautology checks are intentional defensive guards"
+    }
+  ],
+  "notes": {
+    "reentrancy_benign": "TrustPolicyRegistry uses ReentrancyGuardUpgradeable on all external-call paths",
+    "access_control": "All state-mutating functions are protected by onlyRole modifiers (AccessControlUpgradeable)",
+    "integer_overflow": "All contracts use Solidity ^0.8.25 with built-in overflow protection"
+  }
+}

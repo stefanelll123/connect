@@ -1,0 +1,80 @@
+{
+  "id": "TASK-056",
+  "title": "Sentinel UI: Local Access Control (localhost binding, optional auth, CSRF protection)",
+  "component": "sentinel/ui/access_control",
+  "status": "pending",
+  "description": "Secure the sentinel's local UI against unauthorized access and common web attacks. By default the UI binds only to 127.0.0.1 (TASK-054). This task adds: optional Basic Auth or local token authentication for the /ui prefix, CSRF token enforcement for any state-changing UI actions (though mutations are kept to a minimum — primarily CLI), restrictive Content Security Policy and anti-embedding headers, and documentation for Kubernetes port-forward access patterns.",
+  "objectives": [
+    "Optional Basic Auth or env-var-based token for /ui/* routes",
+    "CSRF token required for any POST mutation routes under /ui",
+    "CSP: default-src 'self', X-Frame-Options: DENY, X-Content-Type-Options: nosniff",
+    "Referrer-Policy: no-referrer for all UI responses",
+    "Kubernetes port-forward documentation for accessing UI remotely",
+    "Startup warning if UI exposed on non-loopback interface without auth enabled"
+  ],
+  "implementation_guidance": {
+    "steps": [
+      {
+        "step": 1,
+        "title": "Implement optional UI authentication middleware",
+        "detail": "In `sentinel/ui/access_control.py`, create FastAPI middleware `UIAuthMiddleware`. Check env vars at startup: `SENTINEL_UI_AUTH=none|basic|token` (default: `none`). For `basic`: prompt uses `Authorization: Basic <base64(user:pass)>` where user is `sentinel` and pass is value of `SENTINEL_UI_PASSWORD` env var. If `SENTINEL_UI_PASSWORD` not set and auth=basic: fail startup with `ConfigurationError`. For `token`: check `Authorization: Bearer <token>` where token matches `SENTINEL_UI_TOKEN` env var. For auth failures: return `Response(status_code=401, headers={'WWW-Authenticate': 'Basic realm=\"Sentinel UI\"'})`. Apply only to routes under `/ui/` prefix."
+      },
+      {
+        "step": 2,
+        "title": "Implement CSRF protection",
+        "detail": "CSRF is only needed if UI has any POST/PUT/DELETE routes (mutation actions). Currently, the UI is read-only — all mutations go through sentinelctl CLI. However, add CSRF token infrastructure for future mutation endpoints. Implement using Double-Submit Cookie pattern: on first GET /ui/*, set `csrf_token=<secrets.token_urlsafe(32)>` in a `SameSite=Strict; HttpOnly; Path=/ui` cookie. For any POST under /ui: validate `X-CSRF-Token` header matches cookie value (constant-time compare). If mismatch: return 403. In Jinja2 base.html template: include `<meta name='csrf-token' content='{{ csrf_token }}'>` and inject into any future form submissions via JS."
+      },
+      {
+        "step": 3,
+        "title": "Security headers middleware",
+        "detail": "In `sentinel/ui/access_control.py`, add `UISecurityHeadersMiddleware` that adds headers to every `/ui/*` response: `Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'`. `X-Frame-Options: DENY`. `X-Content-Type-Options: nosniff`. `Referrer-Policy: no-referrer`. `Permissions-Policy: camera=(), microphone=(), geolocation=()`. Apply these headers even on 401/403 responses to prevent clickjacking on the login prompt."
+      },
+      {
+        "step": 4,
+        "title": "Non-loopback exposure warning",
+        "detail": "In `sentinel/core/startup.py` (extends TASK-054), after binding decision: if `SENTINEL_UI_HOST != '127.0.0.1'` AND `SENTINEL_UI_AUTH == 'none'`: log CRITICAL: `event=ui_insecure_exposure host={host} auth=none. Set SENTINEL_UI_AUTH=token and SENTINEL_UI_TOKEN to protect the UI.`. Do NOT prevent startup, but increment an `insecure_config_warnings_total` Prometheus counter. This allows the operator to consciously override for controlled environments (e.g., Docker Compose dev) while being alerted in monitoring."
+      },
+      {
+        "step": 5,
+        "title": "Kubernetes port-forward documentation",
+        "detail": "File: `docs/deployment/ui_access.md`. Contents: (1) Default: UI on 127.0.0.1 inside pod, not exposed via Service. (2) Access command: `kubectl port-forward pod/<sentinel-pod> 8081:8080 -n <namespace>` then open `http://127.0.0.1:8081/ui/health`. (3) For automated monitoring: use `kubectl exec` to call `/health/ready` endpoint directly. (4) Security warning: never expose /ui via an Ingress or NodePort in production. (5) If local token auth enabled: set `SENTINEL_UI_TOKEN` via Kubernetes Secret and mount as env var. (6) Session security: close browser after use; UI has no session expiry (timeout in future scope)."
+      },
+      {
+        "step": 6,
+        "title": "Tests",
+        "detail": "Test file: `tests/unit/ui/test_access_control.py`. Cases: (1) GET /ui/health with no auth (auth=none) returns 200; (2) GET /ui/health with auth=basic, valid credentials returns 200; (3) GET /ui/health with auth=basic, wrong password returns 401 with WWW-Authenticate header; (4) GET /ui/health with auth=token, correct token returns 200; (5) GET /ui/health with auth=token, wrong token returns 401; (6) All /ui/* responses have X-Frame-Options: DENY; (7) CSP header present on all /ui/* responses; (8) Non-loopback + auth=none logs CRITICAL warning on startup; (9) CSRF cookie set on first GET /ui/; (10) POST to /ui with missing X-CSRF-Token returns 403."
+      }
+    ]
+  },
+  "project_structure": {
+    "files": {
+      "sentinel/ui/access_control.py": "UIAuthMiddleware, UISecurityHeadersMiddleware, CSRF helpers",
+      "docs/deployment/ui_access.md": "Kubernetes port-forward guide",
+      "tests/unit/ui/test_access_control.py": "10 access control test cases"
+    }
+  },
+  "configuration": {
+    "env_vars": {
+      "SENTINEL_UI_AUTH": "none | basic | token (default: none)",
+      "SENTINEL_UI_PASSWORD": "password for basic auth (required if auth=basic)",
+      "SENTINEL_UI_TOKEN": "bearer token for token auth (required if auth=token)",
+      "SENTINEL_UI_HOST": "127.0.0.1 (default, bind address)"
+    }
+  },
+  "security_constraints": [
+    "If auth=basic and SENTINEL_UI_PASSWORD not set: startup fails (no plaintext default password)",
+    "CSRF cookie must be SameSite=Strict to prevent cross-site request inclusion",
+    "UI password must not be logged at startup (log auth_mode but not credential value)",
+    "Content-Security-Policy frame-ancestors: none prevents embedding in iframes (clickjacking)",
+    "Referrer-Policy: no-referrer prevents sensitive path disclosure to external resources (if future UI has external links)"
+  ],
+  "dependencies": ["TASK-054"],
+  "acceptance_criteria": [
+    "All /ui/* endpoints protected when auth enabled (401 on missing/wrong credentials)",
+    "All 10 test cases pass",
+    "Security headers present on all UI responses including error pages",
+    "CSRF cookie set on first visit and required for POST actions",
+    "Startup logs CRITICAL when UI exposed on non-loopback without auth",
+    "port-forward documentation is accurate and tested manually"
+  ]
+}

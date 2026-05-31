@@ -1,0 +1,86 @@
+@startuml seq-request-execution
+title Consumer-to-Producer Request Execution Flow
+
+participant "Consumer Service" as consumer
+participant "Consumer Sentinel\n(:9000 fwd proxy)" as csent
+participant "Vault (Consumer)" as cvault
+participant "Redis (Producer)" as redis
+participant "Producer Sentinel\n(:8080 rev proxy)" as psent
+participant "IssuerRegistry\n(Blockchain)" as chain
+participant "Producer Service" as producer
+
+== Outbound request intercepted by Consumer Sentinel ==
+
+consumer -> csent: GET /citizen-data/12345\nHost: services.mfp.gov.ro
+
+csent -> cvault: Get private key (cached in memory)
+cvault --> csent: private_key_bytes
+
+csent -> csent: req.path = "/citizen-data/12345"\nreq.method = "GET"\nreq.query_hash = sha256_b64url("")\nreq.body_hash = EMPTY_BODY_HASH
+
+csent -> csent: Build ProofClaims:\n  iss=consumer_did, aud=producer_did\n  env="prod", iat, exp=iat+30\n  jti=uuid4()\n  req={method, path, query_hash, body_hash}
+
+csent -> csent: sign_jws(proof_claims, private_key)\n→ compact ProofClaims JWS
+
+csent -> csent: Assemble JWT-VP:\n  vp.verifiableCredential = [stored_jwt_vc]\n  sign VP with private_key
+
+== Request forwarded to Producer Sentinel ==
+
+csent -> psent: GET /citizen-data/12345\nAuthorization: SentinelProof <proof-jws>\nSentinelVP: <jwt-vp>
+
+== Producer Sentinel verification (10-step procedure) ==
+
+psent -> psent: [Step 1] Parse ProofClaims header\n  Verify alg=EdDSA ∉ PROHIBITED_ALGS
+
+psent -> psent: [Step 2] Resolve iss DID (did:key)\nExtract public key from DID document
+
+psent -> psent: [Step 3] Verify ProofClaims JWS signature
+
+psent -> psent: [Step 4] Verify aud = own DID
+
+psent -> redis: SETNX jti:<jti_value> 1 EX 30
+redis --> psent: OK (1 = new, 0 = seen)
+alt JTI already seen
+    psent --> csent: 401 REPLAY_DETECTED
+    csent --> consumer: 401 Unauthorized
+end
+
+psent -> psent: [Step 5] Verify req.method=GET\nVerify req.path=/citizen-data/12345\nVerify req.query_hash matches\nVerify req.body_hash = EMPTY_BODY_HASH
+
+psent -> psent: [Step 6] Parse SentinelVP header\nVerify VP signature\nExtract JWT-VC from vp.verifiableCredential[0]
+
+psent -> psent: [VC Step 1] Verify VC alg ∉ PROHIBITED_ALGS
+psent -> psent: [VC Step 3] Verify VC signature\n[VC Step 6] Verify nbf <= now <= exp\n[VC Step 7] Verify env="prod"\n[VC Step 8] Verify aud = own DID
+
+psent -> redis: GET status_list:list-001
+redis --> psent: cached bitstring (or MISS)
+alt Cache miss or stale
+    psent -> psent: Fetch status list from Discovery
+    psent -> psent: Verify status list JWS signature
+    psent -> chain: statusAnchor.getHash("list-001")
+    chain --> psent: expected_hash
+    psent -> psent: Verify sha256(bitstring) == expected_hash
+    psent -> redis: SET status_list:list-001 <bitstring> EX <delta>
+end
+psent -> psent: [VC Step 9] Check bit at statusListIndex 42 → 0 (not revoked)
+
+psent -> redis: GET issuer_active:<issuer_did>
+redis --> psent: true (cached) or MISS
+alt Cache miss
+    psent -> chain: issuerRegistry.isActive(issuer_did)
+    chain --> psent: true
+    psent -> redis: SET issuer_active:<issuer_did> 1 EX 300
+end
+psent -> psent: [VC Step 10] Issuer is active
+
+psent -> psent: Policy check:\n  scope ⊇ {service:citizen-data:read} ✓\n  path /citizen-data/* matches scope ✓
+
+psent -> producer: GET /citizen-data/12345\n(stripped of SentinelProof + SentinelVP headers)
+producer --> psent: 200 OK { "name": "Ion Popescu", ... }
+
+psent -> psent: Emit audit entry:\n  { decision=ALLOW, consumer_did, resource, jti, ts }
+
+psent --> csent: 200 OK { "name": "Ion Popescu", ... }
+csent --> consumer: 200 OK { "name": "Ion Popescu", ... }
+
+@enduml
