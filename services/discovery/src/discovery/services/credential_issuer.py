@@ -82,8 +82,11 @@ def _sign_vc(payload: dict, settings: DiscoverySettings) -> str:
     kid = settings.jwt_issuer_key_id or "local-key"
     if settings.discovery_private_key_hex:
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        raw_hex = settings.discovery_private_key_hex
+        if raw_hex.startswith(("0x", "0X")):
+            raw_hex = raw_hex[2:]
         private_key = Ed25519PrivateKey.from_private_bytes(
-            bytes.fromhex(settings.discovery_private_key_hex)
+            bytes.fromhex(raw_hex)
         )
         return pyjwt.encode(
             payload,
