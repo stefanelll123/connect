@@ -1,0 +1,73 @@
+# Consumer EC2 Docker Compose
+# Runs: sentinel-consumer + Locust load generator
+#
+# All env vars injected via /opt/connect/.env.consumer by consumer-setup.sh
+
+services:
+  sentinel-consumer:
+    image: ${DOCKER_HUB_USERNAME}/connect-sentinel:${IMAGE_TAG}
+    environment:
+      SENTINEL_ROLE: consumer
+      SERVICE_ID: aws-sentinel-consumer
+      SENTINEL_ENV: loadtest
+      SENTINEL_HOME: /data
+      SENTINEL_PASSPHRASE: ${SENTINEL_PASSPHRASE}
+      DATABASE_URL: postgresql+asyncpg://sentinel_user:${POSTGRES_PASSWORD}@${HUB_PRIVATE_IP}:5432/sentinel_db
+      REDIS_URL: redis://:${REDIS_PASSWORD}@${HUB_PRIVATE_IP}:6379/2
+      BLOCKCHAIN_RPC_URL: http://${HUB_PRIVATE_IP}:8545
+      BLOCKCHAIN_CHAIN_ID: "31337"
+      BLOCKCHAIN_INTEGRATION: "true"
+      CONTRACT_ISSUER_REGISTRY: ${CONTRACT_ISSUER_REGISTRY}
+      CONTRACT_TRUST_POLICY_REGISTRY: ${CONTRACT_TRUST_POLICY_REGISTRY}
+      CONTRACT_STATUS_REGISTRY: ${CONTRACT_STATUS_REGISTRY}
+      CONTRACT_SERVICE_REGISTRY: ${CONTRACT_SERVICE_REGISTRY}
+      DISCOVERY_URL: http://${HUB_PRIVATE_IP}:8000
+      SECRET_STORAGE_MASTER_KEY: ${SECRET_STORAGE_MASTER_KEY}
+      SENTINEL_SECRET_BACKEND: local
+      SECRET_STORAGE_PATH: /data/secrets
+      SERVICE_NAME: sentinel-consumer
+      SERVICE_VERSION: "0.1.0"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://${HUB_PRIVATE_IP}:4318
+      OTEL_ENABLED: "true"
+      DEPLOYMENT_ENVIRONMENT: loadtest
+      ENROLLMENT_TOKEN: ${ENROLLMENT_TOKEN_CONSUMER}
+    ports:
+      - "8101:8080"
+    volumes:
+      - sentinel_consumer_data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health/live')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+    networks:
+      - consumer_net
+
+  locust:
+    image: locustio/locust:latest
+    command:
+      - "-f"
+      - "/mnt/locustfile.py"
+      - "--host"
+      - "http://sentinel-consumer:8080"
+      - "--web-port"
+      - "8089"
+    volumes:
+      - /opt/connect/tests/load/locustfile.py:/mnt/locustfile.py:ro
+    ports:
+      - "8089:8089"
+    depends_on:
+      sentinel-consumer:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - consumer_net
+
+volumes:
+  sentinel_consumer_data:
+
+networks:
+  consumer_net:
+    name: consumer_net
