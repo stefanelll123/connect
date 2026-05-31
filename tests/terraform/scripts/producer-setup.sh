@@ -21,7 +21,7 @@ set +a
 
 # ── Wait for hub to be ready (polls SSM) ─────────────────────────────────────
 echo "Waiting for hub-ready flag in SSM (/$SSM_PREFIX/status/hub-ready)..."
-MAX_RETRIES=60
+MAX_RETRIES=120
 for i in $(seq 1 "$MAX_RETRIES"); do
   HUB_READY=$(aws ssm get-parameter \
     --region "$AWS_DEFAULT_REGION" \
