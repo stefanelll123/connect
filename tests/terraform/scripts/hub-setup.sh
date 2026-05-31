@@ -154,18 +154,32 @@ echo "✓ Discovery service healthy"
 
 # ── Issue enrollment tokens for producer and consumer sentinels ───────────────
 echo "Issuing enrollment tokens..."
-ENROLL_TOKEN_PRODUCER=$(curl -sf \
-  -X POST "http://localhost:8201/api/v1/admin/enrollment-tokens" \
+
+# Get a short-lived operator JWT from the local_jwt dev-token endpoint
+ADMIN_JWT=$(curl -sf \
+  -X POST "http://localhost:8201/api/v1/auth/dev-token" \
   -H "Content-Type: application/json" \
-  -H "X-Admin-API-Key: $DISCOVERY_ADMIN_API_KEY" \
-  -d '{"service_id": "aws-sentinel-producer", "role": "producer", "env": "loadtest", "ttl": 3600}' \
+  -d "{\"sub\": \"bootstrap\", \"roles\": [\"operator\"], \"actor_type\": \"ADMIN\"}" \
+  | jq -r '.access_token')
+
+if [ -z "$ADMIN_JWT" ] || [ "$ADMIN_JWT" = "null" ]; then
+  echo "ERROR: Failed to obtain admin JWT from discovery dev-token endpoint" >&2
+  exit 1
+fi
+echo "  Admin JWT obtained"
+
+ENROLL_TOKEN_PRODUCER=$(curl -sf \
+  -X POST "http://localhost:8201/api/v1/sentinels/enrollments" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $ADMIN_JWT" \
+  -d '{"service_id": "aws-sentinel-producer", "role": "producer", "env": "loadtest", "expires_in_seconds": 3600}' \
   | jq -r '.token')
 
 ENROLL_TOKEN_CONSUMER=$(curl -sf \
-  -X POST "http://localhost:8201/api/v1/admin/enrollment-tokens" \
+  -X POST "http://localhost:8201/api/v1/sentinels/enrollments" \
   -H "Content-Type: application/json" \
-  -H "X-Admin-API-Key: $DISCOVERY_ADMIN_API_KEY" \
-  -d '{"service_id": "aws-sentinel-consumer", "role": "consumer", "env": "loadtest", "ttl": 3600}' \
+  -H "Authorization: Bearer $ADMIN_JWT" \
+  -d '{"service_id": "aws-sentinel-consumer", "role": "consumer", "env": "loadtest", "expires_in_seconds": 3600}' \
   | jq -r '.token')
 
 echo "  Producer token issued (first 8 chars): ${ENROLL_TOKEN_PRODUCER:0:8}..."
