@@ -14,7 +14,6 @@ services:
       SENTINEL_ENV: dev
       SENTINEL_HOME: /data
       SENTINEL_PASSPHRASE: ${SENTINEL_PASSPHRASE}
-      DATABASE_URL: postgresql+asyncpg://sentinel_user:${POSTGRES_PASSWORD}@${HUB_PRIVATE_IP}:5432/sentinel_db
       REDIS_URL: redis://:${REDIS_PASSWORD}@${HUB_PRIVATE_IP}:6379/1
       BLOCKCHAIN_RPC_URL: http://${HUB_PRIVATE_IP}:8545
       BLOCKCHAIN_CHAIN_ID: "31337"
