@@ -150,6 +150,7 @@ services:
       LOCAL_JWT_SECRET: ${DISCOVERY_ADMIN_API_KEY}
       DISCOVERY_AUDIENCE: discovery
     ports:
+      - "8000:8000"
       - "8201:8000"
     depends_on:
       postgres:
